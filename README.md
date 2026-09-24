@@ -28,6 +28,8 @@ See [docs/brd.md](docs/brd.md) for requirements and milestones.
 ```bash
 uv sync                                   # create venv + install deps
 uv run pybricksdev run ble --name "Pybricks Hub" --wait hello.py   # sanity check
+uv run pytest                            # tests (hub tests auto-skip; BRICK_CONSOLE_HUB_TESTS=1 to run them)
+uv run ruff check .                      # lint
 ```
 
 ## Hub recovery
