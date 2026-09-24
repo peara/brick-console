@@ -46,11 +46,19 @@ Single user (the builder). Two usage modes:
 
 Pybricks runs **one user program at a time**, and its firmware exposes no ambient telemetry (see decisions D1). The product is therefore organized around an explicit mode switch, always reflected in the UI:
 
-```
- power on                              user clicks Run
-[HUB OFF] → [ADVERTISING] → [AGENT MODE] ⇄ [PROGRAM MODE]
-                    ▲                    └── Stop/exit ── back to AGENT MODE
-                    └── any disconnect → backoff-reconnect (see F6)
+```mermaid
+stateDiagram-v2
+    state "HUB OFF" as Off
+    state "ADVERTISING" as Adv
+    state "AGENT MODE" as Agent
+    state "PROGRAM MODE" as Prog
+
+    Off --> Adv: power on
+    Adv --> Agent
+    Agent --> Prog: user clicks Run
+    Prog --> Agent: Stop / exit
+    Agent --> Adv: any disconnect - backoff-reconnect (see F6)
+    Prog --> Adv: any disconnect - backoff-reconnect (see F6)
 ```
 
 - **Agent mode (idle).** The server keeps a small telemetry agent installed in hub RAM — a thin wrapper around the `brick_telemetry` library. It never occupies the 5 permanent slots. Pushes: hub info (once), battery ~1 Hz, IMU + port/sensor/motor states ~10 Hz, as JSON lines over stdout (BLE NUS). Dashboard fully live.

@@ -36,19 +36,18 @@ One user (you), two personas in effect:
 
 Pybricks runs **one user program at a time**. Rich monitoring therefore cannot coexist with running *your* program; the product is organized around an explicit mode switch the UI always reflects:
 
-```
-                     power on
-   [HUB OFF] ─────────────────► [ADVERTISING]
-        ▲                             │ server auto-connects
-        │ power off                   ▼
-   [HUB OFF] ◄─── any disconnect [CONNECTED: AGENT MODE]
-                                       │ user clicks Run
-                                       ▼
-                              [CONNECTED: PROGRAM MODE]
-                                (agent stopped; console live)
-                                       │ Stop / program ends
-                                       ▼
-                              back to [AGENT MODE]
+```mermaid
+stateDiagram-v2
+    state "HUB OFF" as Off
+    state "ADVERTISING" as Adv
+    state "CONNECTED: AGENT MODE" as Agent
+    state "CONNECTED: PROGRAM MODE" as Prog
+
+    Off --> Adv: power on
+    Adv --> Agent: server auto-connects
+    Agent --> Prog: user clicks Run
+    Prog --> Agent: Stop / program ends
+    Agent --> Off: any disconnect / power off
 ```
 
 - **Agent mode (idle):** server has installed and started a small telemetry *agent* — a thin wrapper around the `hubdock_telemetry` library — in hub RAM (does not occupy the 5 permanent slots). Agent pushes: hub info (once), battery (~1 Hz), IMU + port/sensor/motor states (~10 Hz) as JSON lines over stdout. Dashboard is fully live.
@@ -131,21 +130,20 @@ Completed state:
 
 ## 8. Architecture overview
 
-```
-┌─────────────┐  WebSocket (JSON events)  ┌──────────────────────────────┐
-│  Browser UI │◄─────────────────────────►│  hubdock server (Linux box) │
-│ (laptop,    │                           │  ├ FastAPI app + WS gateway  │
-│  any LAN    │                           │  ├ BLE manager (bleak /      │
-│  device)    │                           │  │  pybricksdev as library)  │
-└─────────────┘                           │  ├ Program library (files)   │
-                                          │  └ Telemetry buffer (ring)    │
-┌──────────────┐   MQTT/poll (later)      └──────────┬───────────────────┘
-│ CoreInk e-ink│◄─────────────────────────────────────┘
-└──────────────┘                                   BLE (GATT: NUS + Pybricks chars)
-                                          ┌──────────▼───────────┐
-                                          │ 51515 hub (Pybricks) │
-                                          │  agent / user prog   │
-                                          └──────────────────────┘
+```mermaid
+flowchart LR
+    Browser["Browser UI<br/>(laptop, any LAN device)"]
+    CoreInk["CoreInk e-ink"]
+
+    subgraph Server["hubdock server (Linux box)"]
+        Stack["FastAPI app + WS gateway<br/>BLE manager (bleak / pybricksdev as library)<br/>Program library (files)<br/>Telemetry buffer (ring)"]
+    end
+
+    Hub["51515 hub (Pybricks)<br/>agent / user prog"]
+
+    Browser <-->|"WebSocket (JSON events)"| Server
+    CoreInk <-->|"MQTT / poll (later)"| Server
+    Server <-->|"BLE (GATT: NUS + Pybricks chars)"| Hub
 ```
 
 **Hub↔server wire protocol (v1):** JSON-lines over the Nordic UART Service (stdout) for telemetry, stdin writes for commands, Pybricks GATT commands for install/run/stop (documented profile, investigation.md [38]). The server impersonates the role Pybricks Code plays in a browser.

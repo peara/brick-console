@@ -4,32 +4,21 @@ Companion to [brd.md](brd.md). Covers components, protocols, the two-mode state 
 
 ## 1. System context
 
-```
-                        LAN / Tailscale
-  ┌──────────────┐   HTTP + WebSocket    ┌─────────────────────────────┐
-  │ Any browser  │◄────────────────────►│ brick-console server        │
-  │ (laptop/     │                       │ (Linux gateway box)         │
-  │  phone)      │                       │                             │
-  └──────────────┘                       │  ┌───────────────────────┐  │
-                                         │  │ web app (FastAPI)     │  │
-  ┌──────────────┐   MQTT / HTTP poll   │  │ WS event gateway      │  │
-  │ CoreInk e-ink│◄──────────────────────┼──┤ telemetry ring buffer │  │
-  │ panel (M4)   │                       │  │ program library (fs)   │  │
-  └──────────────┘                       │  └───────────────────────┘  │
-                                         │  ┌───────────────────────┐  │
-                                         │  │ BLE manager service   │  │
-                                         │  │ (bleak / pybricksdev  │  │
-                                         │  │  as library)          │  │
-                                         │  └───────────┬───────────┘  │
-                                         └──────────────┼──────────────┘
-                                                        │ BLE GATT
-                                                        │ (Pybricks service
-                                                        │  + Nordic UART)
-                                         ┌──────────────▼──────────────┐
-                                         │ 51515 Inventor Hub          │
-                                         │ Pybricks v4.0.1 firmware    │
-                                         │ running: agent | user prog  │
-                                         └─────────────────────────────┘
+```mermaid
+flowchart LR
+    Browser["Any browser<br/>(laptop / phone)"]
+    CoreInk["CoreInk e-ink panel (M4)"]
+
+    subgraph Server["brick-console server (Linux gateway box)"]
+        WebApp["web app (FastAPI)<br/>WS event gateway<br/>telemetry ring buffer<br/>program library (fs)"]
+        BLE["BLE manager service<br/>(bleak / pybricksdev as library)"]
+    end
+
+    Hub["51515 Inventor Hub<br/>Pybricks v4.0.1 firmware<br/>running: agent | user prog"]
+
+    Browser <-->|"HTTP + WebSocket (LAN / Tailscale)"| Server
+    CoreInk <-->|"MQTT / HTTP poll"| Server
+    BLE <-->|"BLE GATT (Pybricks service + Nordic UART)"| Hub
 ```
 
 ## 2. Components (v1)
@@ -102,12 +91,14 @@ Decision deferred to M4 (MQTT broker vs plain HTTP poll). Both ride the same tel
 
 ## 4. State model (server-tracked)
 
-```
-OFFLINE ──scan──► ADVERTISING ──connect──► AGENT ──run──► PROGRAM
-   ▲                  │                          │           │
-   └── hub off ───────┘                          │           │
-   └── external client took hub ── backoff ─────┘           │
-   └── program ended/crashed/Stop ──────────────────────────┘──► AGENT
+```mermaid
+stateDiagram-v2
+    OFFLINE --> ADVERTISING: scan
+    ADVERTISING --> AGENT: connect
+    AGENT --> PROGRAM: run
+    ADVERTISING --> OFFLINE: hub off
+    AGENT --> OFFLINE: external client took hub - backoff
+    PROGRAM --> AGENT: program ended / crashed / Stop
 ```
 
 | State | Meaning | Dashboard shows |
