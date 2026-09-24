@@ -2,7 +2,7 @@
 
 Self-hosted management console for the LEGO® MINDSTORMS® Robot Inventor 51515 hub (Pybricks firmware): server-side BLE, web dashboard, program install/run, live telemetry.
 
-The Linux gateway box holds the one BLE connection to the hub; any browser on LAN/Tailscale gets a live dashboard, program editor, and console — no Bluetooth hardware needed on the client.
+brick-console runs on an always-on Linux machine with a Bluetooth Low Energy adapter — that server holds the *only* BLE connection to the hub. Every other device — laptop, phone, tablet — is just a web browser on your LAN or Tailscale network: no Bluetooth hardware, nothing to install.
 
 ## Status
 
@@ -22,7 +22,8 @@ See [docs/brd.md](docs/brd.md) for requirements and milestones.
 
 ## Quick start (dev)
 
-Requires: Linux with BlueZ, a BLE adapter, Python 3.12+, [uv](https://docs.astral.sh/uv/).
+**Server (the machine with the Bluetooth adapter):** Linux with BlueZ, a BLE adapter, Python 3.12+, [uv](https://docs.astral.sh/uv/).
+**Clients (any other device):** a web browser — nothing else.
 
 ```bash
 uv sync                                   # create venv + install deps
