@@ -1,0 +1,14 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Firmware binaries & backups (docs live in firmware/README.md)
+firmware/*.zip
+firmware/*.bin
+
+# Local secrets / tokens
+.env
+
+# OS junk
+.DS_Store
