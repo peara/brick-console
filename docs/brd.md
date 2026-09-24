@@ -117,12 +117,12 @@ Hub flashed with Pybricks v4.0.1 over USB DFU; original LEGO firmware backed up 
 
 | # | Question | Resolution plan |
 |---|---|---|
-| Q1 | Does pybricksdev's *library* API expose all flows need (scan-by-name, download+run, stop, stdin/stdout streams)? | Verify in M1 spike — read `pybricksdev/ble/pybricks.py` + write a minimal connect/run/stop harness |
+| Q1 | ~~Does pybricksdev's *library* API expose all flows need (scan-by-name, download+run, stop, stdin/stdout streams)?~~ **Answered (2026-09-24, issue #2): yes** — scan-by-name, connect, RAM download+start, stop, stdin, and stdout are all library-level; the only gap is reconnect (build a fresh hub object per connection). Full reference with signatures: [docs/research/pybricksdev-api-notes.md](research/pybricksdev-api-notes.md). Interface pinned as `Transport` (D6). | Done |
 | Q2 | Can a program be written to one of the hub's 5 permanent slots programmatically (not just run-to-RAM)? | Check Pybricks 4 firmware/docs + pybricks-code's slot behavior; unblocks R9 |
 | Q3 | Is the box's USB BLE adapter reliable for long-lived connections? | Soak test during M1: hours-long connection, watch BlueZ disconnects |
 | Q4 | BLE write throughput at 10 Hz telemetry + control commands — is NUS stdout the right wire, or does AppData GATT notify perform better? | Measure in M1 spike; AppData swap is designed-in (D4) |
 
-(Q1 was already partially answered in practice: the hello-world used pybricksdev's own BLE stack successfully, but the library-level API for our server still needs the harness. Q4 is promoted from a footnote to a tracked question.)
+(Q1 was already partially answered in practice: the hello-world used pybricksdev's own BLE stack successfully, but the library-level API for our server still needed the harness. Q4 is promoted from a footnote to a tracked question.)
 
 ## 9. Release milestones
 

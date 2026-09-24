@@ -71,3 +71,13 @@ Short ADR-style log. Each entry: context → decision → consequences. Numbers 
 **Decision:** Private GitHub repo `brick-console`. Docs split into brd.md / architecture.md / decisions.md / research archive (frozen v0.1 draft + investigation). Repo is the code home from day one (uv env lives here; `.venv`, firmware binaries, and the LEGO backup are gitignored or kept outside).
 
 **Consequences:** "hubdock" is retired; all references renamed to brick-console / `brick_telemetry`. Task tracking planned as GitHub Issues + milestones mirroring M0–M5 (Notion stays for diary/logs, not project tasks).
+
+## D6 — All hub access goes through the `Transport` interface
+
+**Status:** accepted (2026-09-24 — resolves BRD Q1)
+
+**Context:** The server needs BLE (scan, connect, install+run, stop, stdin/stdout) and pybricksdev 2.3.2 already implements the Pybricks GATT protocol — but its `PybricksHubBLE` object is CLI-shaped: it prints stdout to the terminal by default, writes tqdm progress bars during download, auto-saves `PB_OF:`-marked output to server files, and has no reconnect-on-one-object API. Server code must not depend on those behaviors or on bleak directly.
+
+**Decision:** One narrow seam — the abstract `Transport` class (`src/brick_console/transport.py`, 7 async operations: discover, connect, install-and-start, stop, write-stdin, subscribe-stdout, disconnect). All server components (state machine, WS gateway, REST) depend on this interface only. The concrete implementation uses pybricksdev as a library where it fits (scan, connect handshake, RAM download+start, chunking — all verified exposed at library level, see `docs/research/pybricksdev-api-notes.md`) and bleak directly where pybricksdev doesn't fit (connection-level events, raw characteristic control if ever needed).
+
+**Consequences:** BLE vendors are mockable in tests (a fake `Transport` drives the state machine); swapping the wire (e.g. D4's AppData option) or the library touches one module. Costs: a thin adapter layer and one indirection hop. pybricksdev behaviors that are wrong for a server (terminal printing, `PB_OF:` file writes, RxPY observables) are contained inside the adapter, translated to plain callbacks.
