@@ -10,5 +10,8 @@ firmware/*.bin
 # Local secrets / tokens
 .env
 
+# Agent tooling state (plans, session state)
+.omo/
+
 # OS junk
 .DS_Store
