@@ -36,15 +36,18 @@ Everything else — code, docs, tests, editor work, scanning, connecting, instal
 ```bash
 uv sync                                                        # set up .venv
 uv run pytest                                                  # tests (hub-marked tests auto-skip)
+uv run ruff check .                                            # lint
+uv run ruff format --check .                                   # formatting check
 uv run pybricksdev run ble --name "Pybricks Hub" --wait <file>.py   # install + run a program (RAM)
 uv run python -c "..."                                         # ad-hoc scripts
 ```
 
 ## Testing conventions
 
-- Unit tests (no hub needed): pure parser/protocol/state logic. These run anywhere.
-- Hardware-in-the-loop tests: mark with `@pytest.mark.hub`; they must auto-skip when the hub isn't advertising. Never move motors in tests.
-- Hub-side `brick_telemetry` is MicroPython — no pytest there. Unit-test pure logic on the host via a stub; verify on-hub with asserts and stdout observation.
+Full convention: [docs/testing.md](docs/testing.md) — strategies per target (server, hub agent, hardware). The invariants:
+
+- `uv run pytest` is always safe to run: hardware tests are marked `@pytest.mark.hub` and auto-skip unless `BRICK_CONSOLE_HUB_TESTS=1`.
+- Tests never move motors — motor-driving verification is manual QA with desk-clear confirmation, not pytest.
 
 ## Conventions
 

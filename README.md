@@ -18,6 +18,7 @@ See [docs/brd.md](docs/brd.md) for requirements and milestones.
 | [docs/brd.md](docs/brd.md) | Product: problem, vision, flows, requirements, milestones |
 | [docs/architecture.md](docs/architecture.md) | System: components, protocols, state model, repo layout |
 | [docs/decisions.md](docs/decisions.md) | ADR-style decision records (D1–D5, D-FL, D-GH) |
+| [docs/testing.md](docs/testing.md) | Testing: strategies per target, the hub-test safety gate |
 | [docs/research/](docs/research/) | Investigation + original BRD draft (frozen archive) |
 
 ## Quick start (dev)
