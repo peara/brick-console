@@ -24,7 +24,8 @@ Everything else — code, docs, tests, editor work, scanning, connecting, instal
 ## Scope and environment
 
 - **The repo is the workspace.** Don't create, modify, or delete anything outside it without asking (one exception: the firmware backup path in rule 4 is read-only reference).
-- **All Python goes through uv, inside the repo.** Use `uv sync` / `uv run …` only. Reason: on this box, bare `python3`/`pip` on PATH resolve to another project's venv (the AI assistant runtime at `/home/peara/.hermes/hermes-agent/venv`) — a plain `pip install` looks harmless but modifies that environment. Never use it.
+- **All Python goes through uv, inside the repo.** Use `uv sync` / `uv run …` only. The bare `python3`/`pip` on PATH are not system interpreters — they live in a virtualenv outside this repo, so a plain `pip install` or `python script.py` silently uses and mutates a foreign environment. Never call them.
+- **This rule is mechanically enforced** (Claude Code): a PreToolUse hook — `.claude/settings.json` → `.claude/hooks/require-uv.sh` — automatically denies bare `python*` / `pip*` / `pytest` Bash commands. If your command is denied, re-run it as `uv run …`. Agents without hook support: follow the same rule; it saves you a confusing debugging session.
 - **Server box:** Linux (Ubuntu), user `peara`. BLE adapter hci0 (USB), BlueZ 5.72, `dfu-util` and udev rules installed. BLE access needs no root.
 - **Hub:** advertises as "Pybricks Hub". Cached address `38:D3:4E:D4:E6:A1`, but the address can drift after re-flash/factory reset — re-scan by name rather than trusting the cached address.
 - **Firmware state:** Pybricks v4.0.1 stable. Recovery is always possible via DFU mode (hold Bluetooth button + plug USB) — flash operations never touch the bootloader region, so a failed/corrupt flash leaves the hub recoverable. (The DFU re-entry drill on Pybricks firmware is still pending — verify once when convenient.)
