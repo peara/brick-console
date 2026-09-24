@@ -1,0 +1,19 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "bash": {
+      "*": "allow",
+      "python*": "deny",
+      "python3*": "deny",
+      "pip*": "deny",
+      "pip3*": "deny",
+      "pytest*": "deny",
+      "sudo python*": "deny",
+      "sudo python3*": "deny",
+      "sudo pip*": "deny",
+      "sudo pip3*": "deny",
+      "env python*": "deny",
+      "env pip*": "deny"
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "./hooks/copilot.sh",
+        "timeoutSec": 10
+      }
+    ]
+  }
+}
