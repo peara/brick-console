@@ -1,5 +1,7 @@
 # M5Stack CoreInk + Mindstorms 51515 — Tooling Investigation
 
+> **Frozen research archive (2026-09-23).** Superseded by [decisions.md](../decisions.md) wherever they conflict — especially the firmware version (now Pybricks v4.0.1 stable, D-FL, not v3.x) and BLE availability (adapter works; was rfkill-soft-blocked at time of writing). Statements below are historical, kept for context only.
+
 Status display: M5Stack CoreInk (ESP32-PICO-D4, 1.54" 200×200 e-ink) driven by Mindstorms Robot Inventor 51515 / SPIKE Prime large hub, with a laptop in the loop.
 
 ## TL;DR

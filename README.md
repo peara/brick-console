@@ -17,9 +17,10 @@ See [docs/brd.md](docs/brd.md) for requirements and milestones.
 |---|---|
 | [docs/brd.md](docs/brd.md) | Product: problem, vision, flows, requirements, milestones |
 | [docs/architecture.md](docs/architecture.md) | System: components, protocols, state model, repo layout |
-| [docs/decisions.md](docs/decisions.md) | ADR-style decision records (D1–D5, D-FL, D-GH) |
+| [docs/decisions.md](docs/decisions.md) | ADR-style decision records (D1–D6, D-FL, D-GH) |
 | [docs/testing.md](docs/testing.md) | Testing: strategies per target, the hub-test safety gate |
-| [docs/research/](docs/research/) | Investigation + original BRD draft (frozen archive) |
+| [docs/research/investigation.md](docs/research/investigation.md) + [brd-v0.1-draft.md](docs/research/brd-v0.1-draft.md) | Frozen research archive (pre-repo investigation, original BRD draft) |
+| [docs/research/pybricksdev-api-notes.md](docs/research/pybricksdev-api-notes.md) | Active library-API reference (Q1 spike; pins pybricksdev behavior) — not archived |
 
 ## Quick start (dev)
 
@@ -42,9 +43,12 @@ The hub runs Pybricks v4.0.1. Original LEGO firmware backup lives outside the re
 ```
 docs/               # project documentation
 programs/           # user program library (served by the console)
-agent/              # hub-side brick_telemetry library (M1)
+agent/              # hub-side brick_telemetry library + agent wrapper (M1)
 src/brick_console/  # server package (M1)
+tests/              # pytest suite (hub-marked hardware tests gated)
+hooks/              # uv-enforcement policy core wired into coding agents
 firmware/           # firmware archives (gitignored; see firmware/README.md)
+hello.py            # M0 bring-up artifact (BLE sanity program)
 ```
 
 ## License

@@ -8,7 +8,7 @@ Short ADR-style log. Each entry: context → decision → consequences. Numbers 
 
 **Context:** The dashboard needs live battery/IMU/port/motor/sensor data. Two candidate channels exist: (a) poll the Pybricks REPL over BLE, or (b) run a program on the hub that pushes data.
 
-**Decision:** Hub-side code. The Pybricks BLE profile exposes no ambient telemetry — only static device info, capabilities, and 3 battery *warning flags*; the Nordic UART stdio pipe carries `print()` output and nothing else. Rich data therefore requires a program. REPL polling is rejected because it interrupts whatever program is running (confirmed by pybricks-hub-tester's own caveat).
+**Decision:** Hub-side code. The Pybricks BLE profile exposes no ambient telemetry — only static device info, capabilities, and 3 battery *warning flags*; the hub stdio pipe (Pybricks event characteristic on v4.0.1; the Nordic UART Service is the legacy pre-1.3 channel) carries `print()` output and nothing else. Rich data therefore requires a program. REPL polling is rejected because it interrupts whatever program is running (confirmed by pybricks-hub-tester's own caveat).
 
 **Consequences:** Telemetry ships as an importable MicroPython library (`brick_telemetry`, see architecture §2.2) plus a thin agent wrapper the server installs in hub RAM when idle. User programs can opt in by importing the library, keeping the dashboard live in Program mode. The wrapper never occupies the 5 permanent slots.
 
@@ -32,13 +32,13 @@ Short ADR-style log. Each entry: context → decision → consequences. Numbers 
 
 **Consequences:** Smaller scope; blocks users are pointed at Pybricks Code. Revisit only if blocks ever matter here.
 
-## D4 — v1 telemetry wire: JSON lines over NUS stdout
+## D4 — v1 telemetry wire: JSON lines over hub stdout
 
 **Status:** accepted (2026-09-23); measurement follow-up promoted to BRD Q4
 
-**Context:** Two candidate wires for agent telemetry: (a) JSON lines via `print()` over the Nordic UART stdio, or (b) binary packing via the Pybricks `AppData` module (lego-control-center's approach).
+**Context:** Two candidate wires for agent telemetry: (a) JSON lines via `print()` over hub stdout, or (b) binary packing via the Pybricks `AppData` module (lego-control-center's approach). On our firmware (Pybricks v4.0.1, profile ≥ 1.3) hub stdout travels as `WRITE_STDOUT` events on the Pybricks command/event characteristic (`c5f50002`) — the Nordic UART Service is the legacy pre-1.3 stdio channel, unused here.
 
-**Decision:** Start with (a) — the pattern of the official Pybricks pc-communication tutorial. Debuggable from any REPL client, trivially parseable, no GATT plumbing beyond NUS.
+**Decision:** Start with (a) — the pattern of the official Pybricks pc-communication tutorial. Debuggable from any REPL client, trivially parseable, no GATT plumbing beyond the Pybricks characteristic notifications.
 
 **Consequences:** Potential throughput overhead vs AppData (JSON is verbose; ~10 Hz × few lines is well within BLE capacity). Q4 in the BRD tracks a measurement during M1; if it disappoints, swap to AppData behind the same server-side event types — the change is contained to `brick_telemetry` + the BLE manager parser.
 
@@ -78,6 +78,8 @@ Short ADR-style log. Each entry: context → decision → consequences. Numbers 
 
 **Context:** The server needs BLE (scan, connect, install+run, stop, stdin/stdout) and pybricksdev 2.3.2 already implements the Pybricks GATT protocol — but its `PybricksHubBLE` object is CLI-shaped: it prints stdout to the terminal by default, writes tqdm progress bars during download, auto-saves `PB_OF:`-marked output to server files, and has no reconnect-on-one-object API. Server code must not depend on those behaviors or on bleak directly.
 
-**Decision:** One narrow seam — the abstract `Transport` class (`src/brick_console/transport.py`, 7 async operations: discover, connect, install-and-start, stop, write-stdin, subscribe-stdout, disconnect). All server components (state machine, WS gateway, REST) depend on this interface only. The concrete implementation uses pybricksdev as a library where it fits (scan, connect handshake, RAM download+start, chunking — all verified exposed at library level, see `docs/research/pybricksdev-api-notes.md`) and bleak directly where pybricksdev doesn't fit (connection-level events, raw characteristic control if ever needed).
+**Decision:** One narrow seam — the abstract `Transport` class (`src/brick_console/transport.py`, 8 async operations: discover, connect, install-and-start, stop, write-stdin, subscribe-stdout, subscribe-status, disconnect). All server components (state machine, WS gateway, REST) depend on this interface only. The concrete implementation uses pybricksdev as a library where it fits (scan, connect handshake, RAM download+start, chunking — all verified exposed at library level, see `docs/research/pybricksdev-api-notes.md`) and bleak directly where pybricksdev doesn't fit (connection-level events, raw characteristic control if ever needed).
 
 **Consequences:** BLE vendors are mockable in tests (a fake `Transport` drives the state machine); swapping the wire (e.g. D4's AppData option) or the library touches one module. Costs: a thin adapter layer and one indirection hop. pybricksdev behaviors that are wrong for a server (terminal printing, `PB_OF:` file writes, RxPY observables) are contained inside the adapter, translated to plain callbacks.
+
+*Amended 2026-09-25 (docs-review finding 1):* the surface gained an 8th operation, `subscribe_status` — program lifecycle is not observable through stdout (a program may end without printing), so the state machine needs the hub's `STATUS_REPORT` snapshots (`USER_PROGRAM_RUNNING` flag edges are the only reliable program-end signal). Status flags cross the seam as `StatusFlags` (`IntFlag` mirroring pybricksdev's `StatusFlag` values); consumers derive edges from snapshots.

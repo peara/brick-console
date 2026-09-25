@@ -6,7 +6,7 @@ Read fully before doing anything. This file is the playbook for any coding agent
 
 brick-console is a self-hosted web console that manages a LEGO® MINDSTORMS® Robot Inventor 51515 hub running Pybricks v4.0.1 firmware. The server (an always-on Linux box with a BLE adapter) is the *only* BLE central; every other device is a browser client over LAN/Tailscale.
 
-Product docs: [docs/brd.md](docs/brd.md) · [architecture.md](docs/architecture.md) · [decisions.md](docs/decisions.md)
+Product docs: [docs/brd.md](docs/brd.md) · [architecture.md](docs/architecture.md) · [decisions.md](docs/decisions.md) · [testing.md](docs/testing.md) · library reference: [docs/research/pybricksdev-api-notes.md](docs/research/pybricksdev-api-notes.md)
 
 ## Hard safety rules (physical hardware involved)
 
@@ -16,7 +16,7 @@ The hub is a physical robot. Software mistakes are cheap; hardware mistakes are 
 2. **Never run a program that can move motors unless the user confirms the desk is clear.** Installing and running benign programs (LED, print, sensor read) is pre-approved. Anything driving a `Motor` is not.
 3. **One BLE central at a time.** If the user is connected via Pybricks Code or anything else, don't attempt a competing connection. Wait or ask.
 4. **The firmware backup is sacred.** `firmware/lego-original-inventor-hub.bin` (gitignored) and `~/hermes/m5stack/backups/lego-original-inventor-hub.bin` are the only copies of the original LEGO firmware. Never modify, move, or delete either. Before any `flash`/`restore`, verify md5 `d0c76999d50b209881e16fe374982267` and prefer the older copy at `~/hermes/m5stack/backups/`.
-5. **No scan loops when the hub is off.** If scanning finds no "Pybricks Hub", report it and stop. The user powers the hub on.
+5. **No interactive scan loops when the hub is off.** If scanning finds no "Pybricks Hub", report it and stop; the user powers the hub on. (Exemption: the brick-console service's own bounded, backoff rescan loop is sanctioned — always-on auto-reconnect is the product's core requirement R1/F6. This rule is about *you*, the agent, at the terminal.)
 6. **Stay off the hub's 5 permanent program slots** until BRD Q2 is resolved. Run-to-RAM only (`pybricksdev run ble` does this correctly).
 
 Everything else — code, docs, tests, editor work, scanning, connecting, installing and running benign programs, telemetry, soak tests — proceeds without asking.
@@ -60,7 +60,7 @@ Full convention: [docs/testing.md](docs/testing.md) — strategies per target (s
 
 ## Hub runtime facts (save yourself surprises)
 
-- Pybricks runs **one user program at a time**; installing a new program stops the current one. See the two-mode state model in architecture.md §4.
+- Pybricks runs **one user program at a time**; installing a new program requires the current one to be stopped first — the hub rejects program writes with `CommandError.BUSY` while a program runs, so the state machine must sequence stop-before-install. See the two-mode state model in architecture.md §4.
 - There is **no ambient telemetry over BLE** — the dashboard requires the `brick_telemetry` agent program installed and running (decisions.md D1).
 - `system.storage` on this hub: 512 bytes, cleared on firmware change. Nothing durable goes there.
 - Run-to-RAM (`pybricksdev run ble`) does not overwrite the 5 permanent slots.
@@ -76,4 +76,4 @@ Full convention: [docs/testing.md](docs/testing.md) — strategies per target (s
 
 ## Task tracking
 
-GitHub Issues in this repo, milestones M1–M5. Check open issues before starting; close with evidence (command output, logs) when done.
+GitHub Issues in this repo, milestones M1–M5 (M1 exists; M2–M5 are created when reached). Check open issues before starting; close with evidence (command output, logs) when done.

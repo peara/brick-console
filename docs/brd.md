@@ -4,7 +4,7 @@
 |---|---|
 | **Product** | brick-console — self-hosted management console for the LEGO® MINDSTORMS® Robot Inventor 51515 hub |
 | **Status** | v0.2 — active development (M1) |
-| **Docs map** | [architecture.md](architecture.md) · [decisions.md](decisions.md) · [research archive](research/investigation.md) · [original draft](research/brd-v0.1-draft.md) |
+| **Docs map** | [architecture.md](architecture.md) · [decisions.md](decisions.md) · [testing.md](testing.md) · library reference: [pybricksdev-api-notes.md](research/pybricksdev-api-notes.md) · [research archive](research/investigation.md) · [original draft](research/brd-v0.1-draft.md) |
 
 ## 1. Problem statement
 
@@ -55,13 +55,16 @@ stateDiagram-v2
 
     Off --> Adv: power on
     Adv --> Agent
-    Agent --> Prog: user clicks Run
-    Prog --> Agent: Stop / exit
-    Agent --> Adv: any disconnect - backoff-reconnect (see F6)
-    Prog --> Adv: any disconnect - backoff-reconnect (see F6)
+    Agent --> Prog: user clicks Run (stop agent → install + start program)
+    Prog --> Agent: Stop / exit (program end detected via hub status event)
+    Agent --> Off: any disconnect (hub off / external client)
+    Prog --> Off: any disconnect (hub off / external client)
+    Off --> Adv: server rescan finds hub again (bounded backoff, F6)
 ```
 
-- **Agent mode (idle).** The server keeps a small telemetry agent installed in hub RAM — a thin wrapper around the `brick_telemetry` library. It never occupies the 5 permanent slots. Pushes: hub info (once), battery ~1 Hz, IMU + port/sensor/motor states ~10 Hz, as JSON lines over stdout (BLE NUS). Dashboard fully live.
+This is the *user-facing mode view* (hub-side states). The canonical server-tracked state model — same four modes as OFFLINE/ADVERTISING/AGENT/PROGRAM, with identical disconnect topology — lives in [architecture.md §4](architecture.md); issue text quotes that one.
+
+- **Agent mode (idle).** The server keeps a small telemetry agent installed in hub RAM — a thin wrapper around the `brick_telemetry` library. It never occupies the 5 permanent slots. Pushes: hub info (once), battery ~1 Hz, IMU + port/sensor/motor states ~10 Hz, as JSON lines over hub stdout (Pybricks event characteristic on v4.0.1; the Nordic UART Service is the legacy pre-1.3 channel). Dashboard fully live.
 - **Program mode.** The user's program owns the hub. Console streams its stdout/stderr. Full telemetry persists **only if the user program imports `brick_telemetry`** (opt-in); otherwise dashboard values freeze and are marked stale.
 - Transitions are server-initiated, one click each way. No REPL polling — it interrupts running programs.
 
@@ -70,7 +73,7 @@ stateDiagram-v2
 **F0 — Bring-up** (one-time; ✅ done 2026-09-24, see research archive)
 Hub flashed with Pybricks v4.0.1 over USB DFU; original LEGO firmware backed up (`~/hermes/m5stack/backups/lego-original-inventor-hub.bin`, md5 `d0c76999…`); BLE hello-world run from the box succeeded. Recovery: DFU mode + `pybricksdev dfu restore <file>`.
 
-**F1 — Open dashboard (daily path).** Hub powered on in BLE range → server auto-connects within seconds, installs + starts agent → open `http://<box>:<port>` on any LAN browser → live cards: battery %, port map + detected devices, live values, IMU orientation, status chip (AGENT / PROGRAM / OFFLINE).
+**F1 — Open dashboard (daily path).** Hub powered on in BLE range → server auto-connects within seconds, installs + starts agent → open `http://<box>:<port>` on any LAN browser → live cards: battery %, port map + detected devices, live values, IMU orientation, status chip (AGENT / PROGRAM / OFFLINE / EXTERNAL — EXTERNAL is the OFFLINE overlay for "external client took the hub", F6).
 
 **F2 — Write & run a program.** Editor pane over server-side program library → **Run**: agent stops → program compiled + downloaded to hub RAM → started → stdout/stderr streams to console pane → **Stop**: program stopped → agent re-installed → dashboard live again. Crashes surface tracebacks; hub stays connected; re-run is one click.
 
@@ -92,7 +95,7 @@ Hub flashed with Pybricks v4.0.1 over USB DFU; original LEGO firmware backed up 
 | R4 | Server-side program library (CRUD files) with one-click run | **Must** |
 | R5 | Two-mode state model enforced in UI; frozen values marked stale unless the running program imports `brick_telemetry` | **Must** |
 | R6 | On-screen remote-control panel → stdin command channel | Should |
-| R7 | Telemetry ring buffer + simple graphs (battery over time, sensor traces) | Should |
+| R7 | Telemetry ring buffer (M1) + simple graphs (battery over time, sensor traces — M5) | Should |
 | R8 | Control via browser Gamepad API (Xbox controller) | Could |
 | R9 | Hub slot management (write permanent slots, slot picker) | Could (blocked on Q2) |
 | R10 | Multi-hub support (~7–8 BLE connections/adapter ceiling) | Could |
@@ -119,8 +122,8 @@ Hub flashed with Pybricks v4.0.1 over USB DFU; original LEGO firmware backed up 
 |---|---|---|
 | Q1 | ~~Does pybricksdev's *library* API expose all flows need (scan-by-name, download+run, stop, stdin/stdout streams)?~~ **Answered (2026-09-24, issue #2): yes** — scan-by-name, connect, RAM download+start, stop, stdin, and stdout are all library-level; the only gap is reconnect (build a fresh hub object per connection). Full reference with signatures: [docs/research/pybricksdev-api-notes.md](research/pybricksdev-api-notes.md). Interface pinned as `Transport` (D6). | Done |
 | Q2 | Can a program be written to one of the hub's 5 permanent slots programmatically (not just run-to-RAM)? | Check Pybricks 4 firmware/docs + pybricks-code's slot behavior; unblocks R9 |
-| Q3 | Is the box's USB BLE adapter reliable for long-lived connections? | Soak test during M1: hours-long connection, watch BlueZ disconnects |
-| Q4 | BLE write throughput at 10 Hz telemetry + control commands — is NUS stdout the right wire, or does AppData GATT notify perform better? | Measure in M1 spike; AppData swap is designed-in (D4) |
+| Q3 | Is the box's USB BLE adapter reliable for long-lived connections? | Soak test during M1: hours-long connection, watch BlueZ disconnects — folded into the hardware smoke-test issue's exit notes (#11/#12); an hours-long watch is ops work after M1 if it slips |
+| Q4 | BLE throughput at 10 Hz telemetry + control commands — is hub stdout (Pybricks event characteristic on v4.0.1; NUS is the legacy pre-1.3 channel) the right wire, or does AppData GATT notify perform better? | Measure in M1 spike; AppData swap is designed-in (D4) |
 
 (Q1 was already partially answered in practice: the hello-world used pybricksdev's own BLE stack successfully, but the library-level API for our server still needed the harness. Q4 is promoted from a footnote to a tracked question.)
 
@@ -129,7 +132,7 @@ Hub flashed with Pybricks v4.0.1 over USB DFU; original LEGO firmware backed up 
 | M | Scope | Exit criteria |
 |---|---|---|
 | M0 Bring-up ✅ | Flash, backup, env, BLE hello-world | Done 2026-09-24 (see F0) |
-| **M1 Read-only dashboard** | BLE manager service + `brick_telemetry` agent + WS gateway + minimal web page | From laptop: live battery/ports/sensors ≤ 5 s after hub power-on |
+| **M1 Read-only dashboard** | Transport adapter (bleak/pybricksdev), BLE manager state machine, `brick_telemetry` agent + wrapper, telemetry ring buffer + replay (R7), FastAPI + WS gateway, minimal web page + mock mode (`?mock=1`), systemd service, hardware smoke test | From laptop: live battery/ports/sensors ≤ 5 s after hub power-on |
 | M2 Run & console | Editor pane, install/run/stop, live console | F2 end-to-end; crash→traceback; one-click back to agent mode |
 | M3 Control & library | On-screen remote, stdin channel, program library CRUD | F3+F4 working; last-one-wins under rapid input |
 | M4 CoreInk panel | Telemetry publish (MQTT/HTTP), CoreInk Arduino client | E-ink shows hub state; ≥15 s refresh |
@@ -152,3 +155,4 @@ v1 succeeds when: the dashboard opens live on the laptop with zero manual steps 
 |---|---|---|
 | v0.1 | 2026-09-23 | First draft (research phase, pre-repo) |
 | v0.2 | 2026-09-24 | Restructured for brick-console repo: split into docs set; hubdock→brick-console rename; F0 marked done; Q4 added; M0 exit recorded |
+| v0.2.1 | 2026-09-25 | Q1 answered (D6, Transport seam); M1 issue plan refined. Then docs-review pass ([research/m1-docs-review.md](research/m1-docs-review.md)): stdout channel corrected (Pybricks event characteristic, not NUS), state model unified with architecture §4, M1 scope row expanded (ring buffer, mock mode, systemd, FastAPI skeleton), install-while-running BUSY semantics stated |
