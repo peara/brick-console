@@ -17,7 +17,7 @@ See [docs/brd.md](docs/brd.md) for requirements and milestones.
 |---|---|
 | [docs/brd.md](docs/brd.md) | Product: problem, vision, flows, requirements, milestones |
 | [docs/architecture.md](docs/architecture.md) | System: components, protocols, state model, repo layout |
-| [docs/decisions.md](docs/decisions.md) | ADR-style decision records (D1–D6, D-FL, D-GH) |
+| [docs/decisions.md](docs/decisions.md) | ADR index (one file per ADR under [docs/adr/](docs/adr/)) — D1–D7, D-FL, D-GH |
 | [docs/testing.md](docs/testing.md) | Testing: strategies per target, the hub-test safety gate |
 | [docs/research/investigation.md](docs/research/investigation.md) + [brd-v0.1-draft.md](docs/research/brd-v0.1-draft.md) | Frozen research archive (pre-repo investigation, original BRD draft) |
 | [docs/research/pybricksdev-api-notes.md](docs/research/pybricksdev-api-notes.md) | Active library-API reference (Q1 spike; pins pybricksdev behavior) — not archived |

@@ -52,7 +52,7 @@ Full convention: [docs/testing.md](docs/testing.md) — strategies per target (s
 ## Conventions
 
 - Layout: `docs/` (documentation), `programs/` (user program library served by the console), `agent/` (hub-side `brick_telemetry` library), `src/brick_console/` (server package), `firmware/` (binaries gitignored, README documents state).
-- Architecture-level changes (wire protocol, state model, storage) get an ADR in [docs/decisions.md](docs/decisions.md) first; small stuff goes directly.
+- Architecture-level changes (wire protocol, state model, storage) get an ADR first — a new file in [docs/adr/](docs/adr/) plus a row in the [decisions.md](docs/decisions.md) index; small stuff goes directly.
 - Server code: async/await (pairs with bleak), type hints, ruff-format defaults.
 - Hub code: MicroPython-compatible subset; f-strings are supported on Pybricks v4; keep modules small — compiled code and data live in limited user RAM.
 - Commits: conventional commits (`feat:`, `fix:`, `docs:`, `chore:`).

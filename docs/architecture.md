@@ -149,7 +149,8 @@ brick-console/
 ├── docs/               # this doc set
 │   ├── brd.md
 │   ├── architecture.md
-│   ├── decisions.md
+│   ├── decisions.md    # ADR index (one row per ADR)
+│   ├── adr/             # one file per ADR (D1–D7, D-FL, D-GH)
 │   ├── testing.md
 │   └── research/       # investigation.md + brd-v0.1-draft.md (frozen archive), pybricksdev-api-notes.md (active library reference)
 ├── programs/           # user program library (server fs)
