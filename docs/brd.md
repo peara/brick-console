@@ -4,7 +4,7 @@
 |---|---|
 | **Product** | brick-console — self-hosted management console for the LEGO® MINDSTORMS® Robot Inventor 51515 hub |
 | **Status** | v0.2 — active development (M1) |
-| **Docs map** | [architecture.md](architecture.md) · [decisions.md](decisions.md) · [testing.md](testing.md) · library reference: [pybricksdev-api-notes.md](research/pybricksdev-api-notes.md) · [research archive](research/investigation.md) · [original draft](research/brd-v0.1-draft.md) |
+| **Docs map** | [architecture.md](architecture.md) · [decisions.md](decisions.md) (ADR index; one ADR per file in [adr/](adr/)) · [testing.md](testing.md) · library reference: [pybricksdev-api-notes.md](research/pybricksdev-api-notes.md) · [research archive](investigation.md) · [original draft](research/brd-v0.1-draft.md) |
 
 ## 1. Problem statement
 
