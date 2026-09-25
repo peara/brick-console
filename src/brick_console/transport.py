@@ -78,13 +78,16 @@ DisconnectListener = Callable[[], None]
 class StatusFlags(IntFlag):
     """Hub status bits, mirroring the Pybricks GATT ``STATUS_REPORT`` payload.
 
-    Values match ``pybricksdev.ble.pybricks.StatusFlag`` so the adapter can
-    pass them through unchanged. Only the bits brick-console consumes are
-    named; the hub reports more.
+    Values match ``pybricksdev.ble.pybricks.StatusFlag`` bit-for-bit — the
+    adapter passes the raw 32-bit flag word through unchanged — and are
+    pinned by test against the installed library. Only the bits
+    brick-console consumes are named; the hub reports more, so test
+    specific bits (``flags & StatusFlags.USER_PROGRAM_RUNNING``), never
+    plain truthiness.
     """
 
-    USER_PROGRAM_RUNNING = 0x01
-    BLE_HOST_CONNECTED = 0x02
+    USER_PROGRAM_RUNNING = 1 << 6
+    BLE_HOST_CONNECTED = 1 << 9
 
 
 StatusListener = Callable[[StatusFlags], None]
@@ -112,8 +115,9 @@ class Transport(ABC):
         Exists because the hub's Bluetooth address drifts after re-flashes —
         the advertised name is the only stable selector. Raises
         ``asyncio.TimeoutError`` if no hub is found in time, which the caller
-        treats as "hub off/asleep" (AGENTS.md rule 5: no scan loops when the
-        hub is off — report and stop).
+        treats as "hub off/asleep" (AGENTS.md rule 5: no *interactive* scan
+        loops when the hub is off — report and stop; the console service's
+        own bounded rescan loop is the sanctioned exemption).
         """
 
     @abstractmethod
@@ -149,7 +153,9 @@ class Transport(ABC):
 
         The hub rejects program writes with ``CommandError.BUSY`` while a
         user program is running — callers must :meth:`stop` first; the
-        state machine sequences stop-before-install.
+        state machine sequences stop-before-install. BUSY surfaces as a
+        GATT write error from the adapter (see api-notes row 4); it is a
+        caller-side precondition, not a typed seam error.
         """
 
     @abstractmethod
@@ -190,10 +196,12 @@ class Transport(ABC):
         and the only reliable program-end signal is the
         ``USER_PROGRAM_RUNNING`` flag clearing in a status report
         (m1-docs-review.md finding 1; pybricksdev's own
-        ``_wait_for_user_program_stop`` watches the same flag). Each call
-        delivers the current flag snapshot; consumers derive edges (set
-        → running, clear → ended). Idempotent per listener, mirroring
-        :meth:`subscribe_stdout`.
+        ``_wait_for_user_program_stop`` watches the same flag). On subscribe
+        the listener is invoked once with the current flags, then on every
+        subsequent report (snapshot semantics — BehaviorSubject-style, so a
+        late subscriber cannot miss the current state); consumers derive
+        edges (set → running, clear → ended). Idempotent per listener,
+        mirroring :meth:`subscribe_stdout`.
         """
 
     @abstractmethod

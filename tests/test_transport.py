@@ -16,6 +16,7 @@ import brick_console.transport as transport_module
 from brick_console.transport import (
     DisconnectListener,
     DiscoveredHub,
+    StatusFlags,
     StatusListener,
     StdoutListener,
     Transport,
@@ -51,3 +52,17 @@ def test_transport_support_types_exist() -> None:
     assert StdoutListener is not None
     assert StatusListener is not None
     assert DisconnectListener is not None
+
+
+def test_status_flags_match_pybricksdev() -> None:
+    # StatusFlags must mirror pybricksdev's StatusFlag bit-for-bit: the
+    # adapter passes the raw STATUS_REPORT flag word through unchanged
+    # (pybricksdev decodes it as StatusFlag(struct.unpack_from("<I", ...))).
+    # A wrong bit value would silently alias another hub flag — e.g. 0x01
+    # is the battery low-voltage *warning* bit, not program-running.
+    from pybricksdev.ble.pybricks import StatusFlag
+
+    assert StatusFlags.USER_PROGRAM_RUNNING == StatusFlag.USER_PROGRAM_RUNNING
+    assert StatusFlags.BLE_HOST_CONNECTED == StatusFlag.BLE_HOST_CONNECTED
+    assert int(StatusFlags.USER_PROGRAM_RUNNING) == 1 << 6
+    assert int(StatusFlags.BLE_HOST_CONNECTED) == 1 << 9
