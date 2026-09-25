@@ -35,15 +35,14 @@ jobs:
           # Hub tests stay gated OFF in CI — no BLE hardware in runners
           BRICK_CONSOLE_HUB_TESTS: ""
 
-      - name: Verify issue template discipline
+      - name: Verify PR template discipline
         if: github.event_name == 'pull_request'
+        env:
+          # PR body comes from the event payload — no API call, no token permissions needed
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          PR_BODY=$(gh pr view "$PR_URL" --json body -q .body)
           # The PR template's checkboxes: body must confirm pytest/ruff or explicitly deviate
           if ! grep -q 'uv run pytest' <<< "$PR_BODY" && ! grep -qi 'deviat' <<< "$PR_BODY"; then
             echo "::error::PR body is missing the Done-when status (pytest/ruff checkboxes) — fill in the PR template"
             exit 1
           fi
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
