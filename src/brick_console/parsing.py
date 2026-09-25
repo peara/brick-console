@@ -2,7 +2,7 @@
 
 The hub-side ``brick_telemetry`` agent prints telemetry lines over hub
 stdout; those arrive at the server as *push* notifications of arbitrary byte
-chunks (``transport.Transpot``'s ``StdoutListener``). A line can split across
+chunks (``transport.Transport``'s ``StdoutListener``). A line can split across
 notification boundaries, even between the ``\r`` and the ``\n`` of its CRLF
 terminator, so framing is server-side (D7). This module owns two things:
 
