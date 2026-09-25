@@ -15,6 +15,9 @@ The interface is shaped by what the pybricksdev library actually exposes
 - install-and-start is a RAM-only download — it never touches the hub's
   permanent slots (AGENTS.md rule 6);
 - stdout arrives as push notifications (callback), not a pullable stream;
+- program lifecycle is observable through status events, not stdout — a
+  program that ends without printing would otherwise be undetectable
+  (m1-docs-review.md finding 1);
 - spontaneous disconnects must be observable so the state machine can react.
 """
 
@@ -22,10 +25,18 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from enum import IntFlag
 from pathlib import Path
 from typing import Protocol
 
-__all__ = ["DisconnectListener", "DiscoveredHub", "StdoutListener", "Transport"]
+__all__ = [
+    "DisconnectListener",
+    "DiscoveredHub",
+    "StatusFlags",
+    "StatusListener",
+    "StdoutListener",
+    "Transport",
+]
 
 
 class DiscoveredHub(Protocol):
@@ -62,6 +73,26 @@ class StdoutListener(Protocol):
 
 DisconnectListener = Callable[[], None]
 """Notified when the hub connection drops — deliberate or spontaneous."""
+
+
+class StatusFlags(IntFlag):
+    """Hub status bits, mirroring the Pybricks GATT ``STATUS_REPORT`` payload.
+
+    Values match ``pybricksdev.ble.pybricks.StatusFlag`` so the adapter can
+    pass them through unchanged. Only the bits brick-console consumes are
+    named; the hub reports more.
+    """
+
+    USER_PROGRAM_RUNNING = 0x01
+    BLE_HOST_CONNECTED = 0x02
+
+
+StatusListener = Callable[[StatusFlags], None]
+"""Notified on every hub status report (a snapshot of current flags, not an edge).
+
+Consumers derive edges themselves (e.g. ``USER_PROGRAM_RUNNING`` clearing
+means the user program ended — the only reliable program-end signal; stdout
+cannot prove it, since a program may exit without printing)."""
 
 
 class Transport(ABC):
@@ -112,9 +143,13 @@ class Transport(ABC):
         program from the ``programs/`` library). RAM-only by design: the
         hub's 5 permanent slots stay untouched (AGENTS.md rule 6, BRD Q2
         open). With ``wait=False`` the call resolves when the program has
-        *started* — completion is observed through stdout/status
-        subscriptions, keeping the server responsive. Raises if the program
-        does not compile or exceeds the hub's RAM program size.
+        *started* — completion is observed through the status subscription
+        (``USER_PROGRAM_RUNNING`` flag clearing), not stdout. Raises if the
+        program does not compile or exceeds the hub's RAM program size.
+
+        The hub rejects program writes with ``CommandError.BUSY`` while a
+        user program is running — callers must :meth:`stop` first; the
+        state machine sequences stop-before-install.
         """
 
     @abstractmethod
@@ -144,6 +179,21 @@ class Transport(ABC):
         clients and the telemetry parser. Callback-based (not a queue) so
         multiple consumers can observe the same bytes. Idempotent per
         listener; an unsubscribe facility is added when a consumer needs it.
+        """
+
+    @abstractmethod
+    async def subscribe_status(self, listener: StatusListener) -> None:
+        """Register ``listener`` for hub status reports.
+
+        Exists because program lifecycle is not observable through stdout:
+        a user program that ends without printing leaves no stdout trace,
+        and the only reliable program-end signal is the
+        ``USER_PROGRAM_RUNNING`` flag clearing in a status report
+        (m1-docs-review.md finding 1; pybricksdev's own
+        ``_wait_for_user_program_stop`` watches the same flag). Each call
+        delivers the current flag snapshot; consumers derive edges (set
+        → running, clear → ended). Idempotent per listener, mirroring
+        :meth:`subscribe_stdout`.
         """
 
     @abstractmethod
