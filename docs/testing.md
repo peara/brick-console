@@ -59,5 +59,5 @@ There is no pytest on the hub. Two stages:
 ## Deliberately not (yet)
 
 - **No CI workflow** — deferred by choice (single-user private repo). Revisit when the suite carries real weight.
-- **No fake-hub/sim tier** — waits for the wire-schema ADR (D7, issue #3: telemetry event model) to know what a fake hub must simulate. The `Transport` seam (D6) is what its tests fake meanwhile.
+- **No fake-hub/sim tier yet** — now unblocked: the wire-schema ADR (D7) defines what a fake hub must simulate — CRLF-terminated canonical lines split at arbitrary chunk boundaries (including mid-CRLF), all four kinds at cadence, occasional malformed lines, occasional unknown kinds. The WS gateway's mock source (`?mock=1`, architecture §2.3) is the first instance of that tier. The `Transport` seam (D6) is what BLE-adjacent tests fake meanwhile.
 - **No motor tests, ever** — manual QA only (AGENTS.md safety rule 2).
