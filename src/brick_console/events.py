@@ -19,9 +19,10 @@ has no wall clock, ordering is per-connection, and the parser stamps
 ``received_at`` is receipt metadata, not wire content: :func:`encode` never
 emits it, and it is excluded from event equality (events compare by wire
 content alone). ``hub_info`` is a *snapshot event*: the server caches the
-latest one outside the event ring and the WS gateway (#8) replays it to
-joining clients before the live stream — this module only fixes that
-classification; the caching is #6/#8's.
+latest one outside the event ring and the WS gateway (architecture §2.1)
+replays it to joining clients before the live stream — this module only fixes
+that classification; the caching belongs to the telemetry store and the WS
+gateway (D7).
 
 Canonical examples — the whole wire format on one page (CRLF terminators
 omitted; :func:`encode` appends them)::
@@ -69,8 +70,8 @@ wraps as :class:`UnknownEvent` carrying the parsed JSON object verbatim
 (forward compatibility is versioned by addition — new kinds and new fields
 on known kinds are safely ignorable). Unknown fields on known kinds are
 ignored, as are the unmapped extra keys of an unknown ``dev`` string; the
-raw line (retained by the raw-log-primary path, #4/#6) remains the verbatim
-record. Wire-level failures — invalid JSON/UTF-8, a non-object payload, a
+raw line (retained by the raw-log-primary path — the telemetry store's
+raw-line ring, D7) remains the verbatim record. Wire-level failures — invalid JSON/UTF-8, a non-object payload, a
 missing or non-string ``"t"``, or a known kind missing required fields or
 carrying wrongly-typed ones — raise :class:`EventDecodeError`, which the
 parser counts as malformed and skips; decoding never guesses. Numbers keep
@@ -125,9 +126,10 @@ class EventDecodeError(ValueError):
 class HubInfo:
     """Snapshot telemetry event: hub identity, emitted once per connect (D7).
 
-    The server caches the latest one outside the event ring (#6) and the WS
-    gateway (#8) replays it to joining clients before the live stream; this
-    module only classifies the event, it does not implement that caching.
+    The server caches the latest one outside the event ring (the telemetry
+    store, D7) and the WS gateway (architecture §2.1) replays it to joining
+    clients before the live stream; this module only classifies the event, it
+    does not implement that caching.
     """
 
     name: str  # wire "name": advertised BLE name (e.g. "Pybricks Hub")
