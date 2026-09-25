@@ -16,4 +16,4 @@ Citation rule inside ADRs: cite stable anchors (other ADRs by D-ID, doc sections
 | D-FL | accepted | 2026-09-24 | Firmware: Pybricks v4.0.1 stable; LEGO firmware backed up | [adr/D-FL-pybricks-v4-firmware.md](adr/D-FL-pybricks-v4-firmware.md) |
 | D-GH | accepted | 2026-09-24 | Repository: `peara/brick-console`, private, docs split | [adr/D-GH-repo-setup.md](adr/D-GH-repo-setup.md) |
 | D6 | accepted (amended 2026-09-25) | 2026-09-24 | All hub access goes through the `Transport` interface | [adr/D6-transport-seam.md](adr/D6-transport-seam.md) |
-| D7 | accepted | 2026-09-25 | Telemetry wire schema: JSON lines over hub stdout; raw-log-primary fan-out | [adr/D7-telemetry-wire-schema.md](adr/D7-telemetry-wire-schema.md) |
+| D7 | accepted (amended 2026-09-25 — citations only) | 2026-09-25 | Telemetry wire schema: JSON lines over hub stdout; raw-log-primary fan-out | [adr/D7-telemetry-wire-schema.md](adr/D7-telemetry-wire-schema.md) |
