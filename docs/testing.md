@@ -40,7 +40,7 @@ All Python goes through `uv` (AGENTS.md) — bare `pytest` is denied by the agen
 
 - Plain pytest + pytest-asyncio **auto mode** — `async def test_*` needs no marker.
 - Unit-test the pure logic first: parsers, protocol frames, state-model transitions. No network, no BLE.
-- The suite never touches real BLE. Once the BLE manager lands (M1), fake at the connection seam — the thin object wrapping bleak — not bleak internals scattered through call sites. If that seam turns into a real abstraction, it gets an ADR (decisions.md) per the usual rule.
+- The suite never touches real BLE. All BLE-adjacent server code goes through the `Transport` seam (decision D6) — fake the `Transport` in tests, not bleak internals scattered through call sites. The fake drives the state machine exactly the way the real adapter will.
 - WS gateway, state model, web handlers: ordinary unit tests like everything else.
 
 ## Hub-agent tests (`agent/` — MicroPython)
@@ -59,5 +59,5 @@ There is no pytest on the hub. Two stages:
 ## Deliberately not (yet)
 
 - **No CI workflow** — deferred by choice (single-user private repo). Revisit when the suite carries real weight.
-- **No fake-hub/sim tier** — waits for the wire-protocol ADR (M1) to know what a fake hub must simulate.
+- **No fake-hub/sim tier** — waits for the wire-schema ADR (D7, issue #3: telemetry event model) to know what a fake hub must simulate. The `Transport` seam (D6) is what its tests fake meanwhile.
 - **No motor tests, ever** — manual QA only (AGENTS.md safety rule 2).
