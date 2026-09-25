@@ -56,7 +56,7 @@ Full convention: [docs/testing.md](docs/testing.md) — strategies per target (s
 - Server code: async/await (pairs with bleak), type hints, ruff-format defaults.
 - Hub code: MicroPython-compatible subset; f-strings are supported on Pybricks v4; keep modules small — compiled code and data live in limited user RAM.
 - Commits: conventional commits (`feat:`, `fix:`, `docs:`, `chore:`).
-- Push to `main` freely (private, single-user); never force-push.
+- Delivery: implementation lands via **PR — never push `main` directly**. Branch `issue-<N>` → PR (`Closes #N`) → owner reviews → owner merges; the merge closes the issue. Docs-only mechanics also go via PR; the PR template (.github/PULL_REQUEST_TEMPLATE.md) is the checklist.
 
 ## Hub runtime facts (save yourself surprises)
 

@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Lint (ruff)
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Test (pytest)
+        run: uv run pytest -q
+        env:
+          # Hub tests stay gated OFF in CI — no BLE hardware in runners
+          BRICK_CONSOLE_HUB_TESTS: ""
+
+      - name: Verify PR template discipline
+        if: github.event_name == 'pull_request'
+        env:
+          # PR body comes from the event payload — no API call, no token permissions needed
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          # The PR template's checkboxes: body must confirm pytest/ruff or explicitly deviate
+          if ! grep -q 'uv run pytest' <<< "$PR_BODY" && ! grep -qi 'deviat' <<< "$PR_BODY"; then
+            echo "::error::PR body is missing the Done-when status (pytest/ruff checkboxes) — fill in the PR template"
+            exit 1
+          fi
