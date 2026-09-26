@@ -51,9 +51,10 @@ class TelemetryStore:
     *current* connection's slice; pre-connection history is still reachable via
     ``replay_events_from(ordinal)`` with absolute ordinals.
 
-    All mutations are synchronous, thread-unsafe by design — the BLE manager
-    writes on the asyncio event loop; the WS gateway reads on the same
-    thread via ``asyncio.to_thread`` or direct in-loop access.
+    All mutations are synchronous, thread-unsafe by design: both the BLE
+    manager (writer) and the WS gateway (reader) must access the store on the
+    asyncio event loop only. Do not read via ``asyncio.to_thread`` — that runs
+    on a worker thread and would race the writer.
     """
 
     __slots__ = (
@@ -187,31 +188,23 @@ class TelemetryStore:
         if count <= 0:
             return []
 
-        start = from_ordinal if from_ordinal is not None else self._conn_start_ordinal
+        items = list(self._events)
 
+        if from_ordinal is not None:
+            # Forward replay from an absolute ordinal: the first `count`
+            # events at or after it, in append order.
+            idx = _lower_bound(items, from_ordinal)
+            return items[idx : idx + count]
+
+        start = self._conn_start_ordinal
         if start is None:
             # No connection marker: newest *count* events from the ring.
-            items = list(self._events)
             return items[-count:] if count < len(items) else items
 
-        # Binary-search the first event whose ordinal >= start.
-        events = self._events
-        lo, hi = 0, len(events)
-        while lo < hi:
-            mid = (lo + hi) // 2
-            if events[mid][0] < start:
-                lo = mid + 1
-            else:
-                hi = mid
-        idx = lo
-        if idx >= len(events):
-            return []
-        result: list[tuple[int, TelemetryEvent]] = []
-        for i in range(idx, len(events)):
-            if len(result) >= count:
-                break
-            result.append(events[i])
-        return result
+        # Default (current connection slice): the *newest* `count` events of
+        # the slice, matching the no-marker path's newest-count semantics.
+        idx = _lower_bound(items, start)
+        return items[max(idx, len(items) - count) :]
 
     def replay_events_from(
         self, from_ordinal: int, *, count: int | None = None
@@ -237,3 +230,20 @@ class TelemetryStore:
             if count < len(self._raw_lines)
             else list(self._raw_lines)
         )
+
+
+def _lower_bound(events: list[tuple[int, TelemetryEvent]], start: int) -> int:
+    """Index of the first event whose ordinal is >= ``start``.
+
+    ``events`` is ordered by ascending ordinal (append order), so a binary
+    search finds the slice start in O(log n). Returns ``len(events)`` when
+    every ordinal is below ``start`` (the slice is empty).
+    """
+    lo, hi = 0, len(events)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if events[mid][0] < start:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo

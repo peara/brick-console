@@ -83,6 +83,28 @@ def test_replay_count_cap_respected() -> None:
     assert [e.voltage_mv for _, e in replayed] == [4, 5]
 
 
+def test_replay_count_cap_within_connection_returns_newest() -> None:
+    # With a connection marker set and more events in the slice than `count`,
+    # the cap must yield the NEWEST `count` (the tail), not the oldest.
+    store = TelemetryStore(event_capacity=100)
+    store.mark_connection_start()
+    _append_n(store, [_battery(mv) for mv in (1, 2, 3, 4, 5)])
+
+    replayed = store.replay_events(2)
+    assert [e.voltage_mv for _, e in replayed] == [4, 5]
+
+
+def test_replay_count_cap_within_connection_across_reconnect() -> None:
+    # Same guarantee across a reconnect: the cap applies to the current slice.
+    store = TelemetryStore(event_capacity=100)
+    _append_n(store, [_battery(mv) for mv in (1, 2, 3)])
+    store.mark_connection_start()
+    _append_n(store, [_battery(mv) for mv in (4, 5, 6, 7, 8)])
+
+    replayed = store.replay_events(2)
+    assert [e.voltage_mv for _, e in replayed] == [7, 8]
+
+
 def test_replay_appends_order_preserved_within_connection() -> None:
     store = TelemetryStore(event_capacity=100)
     events = [_battery(mv) for mv in (10, 20, 30, 40)]
