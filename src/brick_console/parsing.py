@@ -9,13 +9,14 @@ terminator, so framing is server-side (D7). This module owns two things:
 - :class:`LineSplitter` — the raw-log-primary seam: it buffers byte chunks
   and yields complete *raw* lines (CRLF primary, a lone LF tolerated, a
   stray trailing ``\r`` stripped, empty lines skipped silently). It never
-  drops a raw line; the raw-line log path (#4/#6) consumes its output first.
+  drops a raw line; the raw-line log path (the BLE manager's pipeline and the
+  telemetry store's raw-line ring, D7) consumes its output first.
 - :class:`TelemetryParser` — attaches on top of the splitter and turns raw
   lines into typed :mod:`brick_console.events`. It is a class, not a
   generator: ``feed(bytes) -> list[TelemetryEvent]``, plus ``reset()`` and
   a ``malformed_count`` property (and an optional ``on_malformed`` callback
-  so the server can log). One instance per connection; the state machine
-  (#4) constructs a fresh one per connect.
+  so the server can log). One instance per connection; the BLE manager
+  (architecture §4.5) constructs a fresh one per connect.
 
 Robustness contract (D7): the parser never raises on bad input. Malformed
 lines — invalid UTF-8/JSON, a non-object, a missing kind key, a known kind
@@ -172,7 +173,8 @@ class TelemetryParser:
         """Drop any buffered partial line, counting it as malformed.
 
         Called on reconnect so a half-line is never emitted; a fresh parser is
-        constructed per connect (#4), so this is belt-and-braces, not a
+        constructed per connect (the BLE manager owns that lifecycle,
+        architecture §4.5), so this is belt-and-braces, not a
         replacement for instance lifecycle.
         """
         raw = self._splitter.drop_partial()

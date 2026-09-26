@@ -1,5 +1,7 @@
 # M1 docs review — full read of the doc set
 
+> **Frozen report (2026-09-25).** Findings applied in the docs-review pass; issue numbers #4–#12 below are *pre-creation planned numbers* that never became issues — PRs #4–#6 consumed them (GitHub pools issue and PR numbers). The created M1 issues are #7–#16; the mapping is #4→#7, #5→#8, #6→#9, #7→#10, #8→#11, #9→#12, #10→#13, #11/#12→#14, plus the hub-agent gap issue #15 and the citation-cleanup chore #16. Read the numbers as plan labels, not tracker references (AGENTS.md citation policy).
+
 **Reviewed at:** commit `cd13d11` ("spike: pybricksdev API notes + Transport seam (closes #2)"), 2026-09-24.
 **Resolution:** findings 1–27 applied 2026-09-25 in the docs-review pass (branch `docs/m1-review-fixes`); finding 1 was resolved by extending `Transport` with `subscribe_status` (8-op seam, D6 amended); findings 12 + 28 are carried by issue #3's D7 decision list rather than docs text.
 **Scope:** README.md, AGENTS.md, docs/brd.md, docs/architecture.md, docs/decisions.md, docs/research/investigation.md (frozen archive — reviewed only for misleading content), docs/research/pybricksdev-api-notes.md, src/brick_console/transport.py (docstrings as newest Transport spec). docs/testing.md and firmware/README.md were read as supporting context because AGENTS.md and the BRD lean on them.

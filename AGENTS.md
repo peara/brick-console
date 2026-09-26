@@ -53,6 +53,7 @@ Full convention: [docs/testing.md](docs/testing.md) — strategies per target (s
 
 - Layout: `docs/` (documentation), `programs/` (user program library served by the console), `agent/` (hub-side `brick_telemetry` library), `src/brick_console/` (server package), `firmware/` (binaries gitignored, README documents state).
 - Architecture-level changes (wire protocol, state model, storage) get an ADR first — a new file in [docs/adr/](docs/adr/) plus a row in the [decisions.md](docs/decisions.md) index; small stuff goes directly.
+- **Citation policy (durable artifacts):** docs and code never cite issue/PR numbers as *forward pointers* ("the WS gateway (#8) …") — GitHub draws issue and PR numbers from one pool, so a planned number can drift before the issue even exists (D7's planned #4/#6/#8 cites drifted this way within a day). Cite stable anchors instead: other ADRs (D-ID), doc sections (architecture §3.2), module/component names, or requirement IDs (R/F/Q). Closed-issue citations are fine *as provenance* ("accepted 2026-09-25, issue #3") — status lines and doc headers only.
 - Server code: async/await (pairs with bleak), type hints, ruff-format defaults.
 - Hub code: MicroPython-compatible subset; f-strings are supported on Pybricks v4; keep modules small — compiled code and data live in limited user RAM.
 - Commits: conventional commits (`feat:`, `fix:`, `docs:`, `chore:`).
@@ -76,4 +77,4 @@ Full convention: [docs/testing.md](docs/testing.md) — strategies per target (s
 
 ## Task tracking
 
-GitHub Issues in this repo, milestones M1–M5 (M1 exists; M2–M5 are created when reached). Check open issues before starting; close with evidence (command output, logs) when done.
+GitHub Issues in this repo, milestones M1–M5 (M1 exists; M2–M5 are created when reached — decided 2026-09-25, #16, to stay deferred until each milestone starts). Check open issues before starting; close with evidence (command output, logs) when done.

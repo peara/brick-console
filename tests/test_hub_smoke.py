@@ -2,7 +2,8 @@
 
 Its only job right now is proving the hub-test gate: skipped by default,
 trivially green when BRICK_CONSOLE_HUB_TESTS=1. It touches no hardware.
-The real hardware smoke test replaces this body in the M1 finale (issue #1).
+The real hardware smoke test replaces this body in the M1 finale (the
+M1-finale smoke-test issue, testing.md §hub gate).
 """
 
 import pytest
