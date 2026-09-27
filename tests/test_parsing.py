@@ -184,3 +184,36 @@ def test_line_splitter_strips_stray_cr_only_at_end() -> None:
     s = LineSplitter()
     # A stray \r mid-line is content; a trailing \r before LF is stripped.
     assert s.feed(b"a\rb\n") == [b"a\rb"]
+
+
+def test_feed_with_raw_pairs_raw_and_event() -> None:
+    p = _parser(clock=lambda: 7.0)
+    pairs = p.feed_with_raw(BAT + b"\r\n")
+    assert pairs == [
+        (BAT, Battery(voltage_mv=8085, current_ma=42, percent=87, received_at=7.0))
+    ]
+
+
+def test_feed_with_raw_yields_malformed_line_with_none_event() -> None:
+    p = _parser()
+    pairs = p.feed_with_raw(b"Traceback (most recent call last):\r\n" + BAT + b"\r\n")
+    assert [raw for raw, _ in pairs] == [b"Traceback (most recent call last):", BAT]
+    assert pairs[0][1] is None
+    assert isinstance(pairs[1][1], Battery)
+    assert p.malformed_count == 1
+
+
+def test_feed_with_raw_skips_empty_lines_uncounted() -> None:
+    p = _parser()
+    pairs = p.feed_with_raw(b"\r\n  \r\n" + BAT + b"\r\n")
+    assert len(pairs) == 1
+    assert p.malformed_count == 0
+
+
+def test_feed_with_raw_matches_feed_parity() -> None:
+    p1, p2 = _parser(), _parser()
+    chunk = b"junk\r\n" + HUB + b"\r\n" + b"{bad json\r\n" + IMU + b"\r\n"
+    from_feed = p1.feed(chunk)
+    from_pairs = [e for _, e in p2.feed_with_raw(chunk) if e is not None]
+    assert from_feed == from_pairs
+    assert p1.malformed_count == p2.malformed_count == 2

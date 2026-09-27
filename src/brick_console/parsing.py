@@ -151,7 +151,20 @@ class TelemetryParser:
         Never raises: any bad line is counted as malformed and skipped, and
         subsequent lines in the same chunk still parse.
         """
-        events: list[TelemetryEvent] = []
+        return [event for _, event in self.feed_with_raw(data) if event is not None]
+
+    def feed_with_raw(self, data: bytes) -> list[tuple[bytes, TelemetryEvent | None]]:
+        """Feed a chunk; return ``(raw line, decoded event or None)`` per line.
+
+        The raw-log-primary seam (D7 fan-out, architecture §4.5): the BLE
+        manager routes each raw line to the raw-line log path (primary) and
+        to the telemetry pipeline off one split — no double-framing.
+        Malformed lines appear with ``None`` as their event, counted here
+        exactly like chunk-level :meth:`feed`; empty/whitespace-only lines
+        are skipped silently and never appear. The raw line is yielded
+        verbatim (terminator-stripped) whether it parsed or not.
+        """
+        pairs: list[tuple[bytes, TelemetryEvent | None]] = []
         for raw in self._splitter.feed(data):
             if not raw.strip():
                 continue  # empty / whitespace-only line: skipped silently, uncounted
@@ -159,15 +172,17 @@ class TelemetryParser:
                 line = raw.decode("utf-8")
             except UnicodeDecodeError:
                 self._note_malformed(raw, "invalid UTF-8")
+                pairs.append((raw, None))
                 continue
             try:
                 event = decode(line)
             except EventDecodeError as exc:
                 self._note_malformed(raw, str(exc))
+                pairs.append((raw, None))
                 continue
             event = _stamp(event, self._clock())
-            events.append(event)
-        return events
+            pairs.append((raw, event))
+        return pairs
 
     def reset(self) -> None:
         """Drop any buffered partial line, counting it as malformed.
