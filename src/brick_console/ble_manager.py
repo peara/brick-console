@@ -375,6 +375,13 @@ class BLEManager:
                 timeout=self._config.connect_timeout,
             )
         except TimeoutError as exc:
+            # A mid-handshake stall can leave the BLE central role held under
+            # the cancelled connect — release it (idempotent, best-effort per
+            # the seam contract) before OFFLINE, or every later attempt fights
+            # our own stale role (F6: never hold the role while offline).
+            await self._end_session(
+                f"connect timed out after {self._config.connect_timeout}s"
+            )
             raise ConnectionError(
                 f"connect timed out after {self._config.connect_timeout}s"
             ) from exc

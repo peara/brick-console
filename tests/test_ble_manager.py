@@ -64,6 +64,10 @@ class ConnectOutcome:
     """Scripted result of one ``connect`` call."""
 
     fail: bool = False
+    hang: bool = False
+    """If set, ``connect`` acquires the BLE central role and then never
+    resolves (a hub accepting the link but stalling mid-handshake) — the
+    ``wait_for`` bound cancels it and the manager must release the role."""
     drop_after: float | None = None
     """If set, the connection spontaneously drops this many (fake) seconds
     after connect resolves."""
@@ -112,6 +116,10 @@ class FakeTransport(Transport):
         if outcome.fail:
             raise ConnectionError("another central holds the hub")
         self.on_disconnect.append(on_disconnect)
+        if outcome.hang:
+            # Mid-handshake stall: the central role is acquired (the hook is
+            # live) but the handshake never completes.
+            await asyncio.Event().wait()
         if self.program_running_at_connect:
             # A stale user program still running at connect — held as the
             # current snapshot; subscribe_status replays it (seam contract).
@@ -411,6 +419,33 @@ async def test_connect_failure_holds_backoff_and_never_fights(
             )
         )
         assert fake_time.sleeps[:3] == [0.0, 1.0, 2.0]
+    finally:
+        await cancel_quietly(task)
+
+
+async def test_connect_timeout_releases_central_role_before_rescan(
+    transport: FakeTransport, sink: FakeSink, fake_time: FakeTime
+) -> None:
+    transport.discover_results = [FakeHub(), FakeHub()]
+    transport.connect_outcomes = [ConnectOutcome(hang=True), ConnectOutcome()]
+    manager = make_manager(transport, sink, fake_time, connect_timeout=0.05)
+    task = asyncio.create_task(manager.run())
+    try:
+        await run_until(manager, state=HubState.AGENT)
+        ops = transport.ops
+        hung_connect = ops.index("connect(Pybricks Hub)")
+        rescan = ops.index("discover(Pybricks Hub)", hung_connect + 1)
+        releases = [
+            i
+            for i, op in enumerate(ops)
+            if op == "disconnect()" and hung_connect < i < rescan
+        ]
+        # F6: the mid-handshake timeout may leave the BLE central role held
+        # under the cancelled connect — it must be released before the next
+        # discover, or every later attempt fights our own stale role.
+        assert releases, f"central role leaked into the rescan loop: ops={ops}"
+        assert manager.state is HubState.AGENT
+        assert any("connect timed out" in r for r in reasons(manager))
     finally:
         await cancel_quietly(task)
 
