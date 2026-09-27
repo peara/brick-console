@@ -192,6 +192,9 @@ def test_feed_with_raw_pairs_raw_and_event() -> None:
     assert pairs == [
         (BAT, Battery(voltage_mv=8085, current_ma=42, percent=87, received_at=7.0))
     ]
+    # received_at is compare=False in event equality, so assert the stamp
+    # explicitly — the tuple equality alone would pass unstamped events.
+    assert pairs[0][1].received_at == 7.0
 
 
 def test_feed_with_raw_yields_malformed_line_with_none_event() -> None:
