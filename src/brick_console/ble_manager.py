@@ -24,12 +24,17 @@ State model (architecture §4 — the canonical table):
 
 Program-lifecycle edge derivation (the subtle part): the *agent is itself a
 user program* on the hub, so ``install_and_start`` flips
-``USER_PROGRAM_RUNNING`` too. ``_expected_running`` marks the flag flip our
-own install causes, so the agent's start reads as AGENT, not PROGRAM; only an
-*unexpected* set edge (somebody else started a program) enters PROGRAM.
-Status reports are snapshots (the seam contract); edges are derived here.
-During session setup (``_settling``) snapshots only update the running flag —
-the setup sequence itself is the transition into AGENT.
+``USER_PROGRAM_RUNNING`` too. The expected-start latch is armed in the
+await-free window between ``stop()`` resolving and ``install_and_start``
+being called — arming before the stop would swallow any program that grabs
+the hub while the stop write is in flight, arming after the install would
+misread the agent's own start (the hub reports it while the RPC is still in
+flight). Any CLEAR edge disarms the latch (a clear proves the armed latch
+stale — the hub was stopped or running something else). Only an *unexpected*
+set edge (somebody else started a program) enters PROGRAM. Status reports
+are snapshots (the seam contract); edges are derived here. During session
+setup (``_settling``) snapshots only update the running flag — the setup
+sequence itself is the transition into AGENT.
 
 Data pipeline (D7 raw-log-primary): per connect the manager builds a fresh
 :class:`~brick_console.parsing.TelemetryParser` (dropped on disconnect, so
@@ -453,12 +458,20 @@ class BLEManager:
         """Install and start the agent wrapper — stop-before-install: the hub
         rejects program writes with ``CommandError.BUSY`` while a user
         program runs (D6), so ``stop()`` is always the safe first move
-        (api-notes row 5). The agent's own start flips
-        ``USER_PROGRAM_RUNNING``; ``_expected_running`` marks that flip as
-        ours so it does not read as PROGRAM.
+        (api-notes row 5).
+
+        The expected-start latch is armed only after ``stop()`` resolves and
+        immediately before ``install_and_start`` (an await-free window).
+        Arming before the stop would swallow any program that grabs the hub
+        while the stop write is in flight (status notifications can overtake
+        it); arming only after install resolves would misread the agent's own
+        start SET, which the hub can report while the install RPC is still
+        in flight. A foreign grab inside the tiny armed window still
+        self-heals: the hub rejects our write with BUSY, the reinstall
+        fails, and the manager forces a full reconnect.
         """
-        self._expected_running = True
         await self._transport.stop()
+        self._expected_running = True
         await self._transport.install_and_start(self._config.agent_program)
 
     def _schedule_agent_reinstall(self) -> None:
@@ -525,11 +538,15 @@ class BLEManager:
         if running:
             if self._expected_running:
                 self._expected_running = False
-                return  # our own install-and-start — the agent, not a user program
+                return  # our agent's own start — the agent, not a user program
             if self._settling:
                 return
             self._set_state(HubState.PROGRAM, "user program started")
             return
+        # CLEAR edge: whatever we armed the latch for did not start — the
+        # hub was stopped or running something else. Disarm before anything
+        # else so a stale latch can never swallow the next program report.
+        self._expected_running = False
         if self._settling:
             return
         if self._state is HubState.PROGRAM:

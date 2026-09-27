@@ -28,8 +28,10 @@ from brick_console.ble_manager import (
 )
 from brick_console.events import HubInfo
 from brick_console.transport import (
+    DisconnectListener,
     DiscoveredHub,
     StatusFlags,
+    StatusListener,
     StdoutListener,
     Transport,
 )
@@ -71,6 +73,9 @@ class ConnectOutcome:
     drop_after: float | None = None
     """If set, the connection spontaneously drops this many (fake) seconds
     after connect resolves."""
+    park_stop: bool = False
+    """Plumbed through to :attr:`FakeTransport.park_stop` for the connect
+    that yields this outcome — see there."""
 
 
 class FakeTransport(Transport):
@@ -87,12 +92,18 @@ class FakeTransport(Transport):
         self.discover_results: list[FakeHub | None] = []
         self.connect_outcomes: list[ConnectOutcome] = []
         self.stdout_listeners: list[StdoutListener] = []
-        self.status_listeners: list = []
-        self.on_disconnect: list = []
+        self.status_listeners: list[StatusListener] = []
+        self.on_disconnect: list[DisconnectListener] = []
         self.current_flags = StatusFlags(0)
         self.program_running_at_connect: bool = False
         self.stop_calls: int = 0
         self.now = 0.0  # fake time, advanced by sleep()
+        self.park_stop = False
+        """When set, ``stop()`` yields once before resolving — simulating a
+        real GATT write that lets status notifications overtake it. This is
+        the reinstall hijack window: a foreign program can start while the
+        manager's own stop() is in flight."""
+        self._drop_timers: list[asyncio.TimerHandle] = []
 
     async def discover(self, name: str, *, timeout: float = 10.0) -> DiscoveredHub:
         self.ops.append(f"discover({name})")
@@ -115,7 +126,8 @@ class FakeTransport(Transport):
         )
         if outcome.fail:
             raise ConnectionError("another central holds the hub")
-        self.on_disconnect.append(on_disconnect)
+        hook: DisconnectListener = on_disconnect
+        self.on_disconnect.append(hook)
         if outcome.hang:
             # Mid-handshake stall: the central role is acquired (the hook is
             # live) but the handshake never completes.
@@ -125,8 +137,11 @@ class FakeTransport(Transport):
             # current snapshot; subscribe_status replays it (seam contract).
             self.current_flags = StatusFlags.USER_PROGRAM_RUNNING
         if outcome.drop_after is not None:
-            loop = asyncio.get_running_loop()
-            loop.call_later(outcome.drop_after, lambda: self.on_disconnect[-1]())
+            # The hook is captured at connect time: a stale timer must hit
+            # this session's hook (the manager's identity guard then drops
+            # it), never silently rebind to whichever session is newest.
+            handle = asyncio.get_running_loop().call_later(outcome.drop_after, hook)
+            self._drop_timers.append(handle)
 
     async def install_and_start(self, program: Path, *, wait: bool = False) -> None:
         self.ops.append(f"install_and_start({program.name})")
@@ -136,6 +151,10 @@ class FakeTransport(Transport):
     async def stop(self) -> None:
         self.ops.append("stop()")
         self.stop_calls += 1
+        if self.park_stop:
+            # One event-loop yield inside the stop GATT write — status
+            # notifications can overtake it (the reinstall hijack window).
+            await asyncio.sleep(0)
         self._emit_status(StatusFlags(0))
 
     async def write_stdin(self, data: bytes) -> None:
@@ -152,6 +171,9 @@ class FakeTransport(Transport):
 
     async def disconnect(self) -> None:
         self.ops.append("disconnect()")
+        for handle in self._drop_timers:
+            handle.cancel()
+        self._drop_timers.clear()
 
     def _emit_status(self, flags: StatusFlags) -> None:
         self.current_flags = flags
@@ -554,6 +576,60 @@ async def test_stale_program_at_connect_is_stopped_by_setup(
         await cancel_quietly(task)
 
 
+async def test_program_start_during_reinstall_window_reads_as_program(
+    transport: FakeTransport, sink: FakeSink, fake_time: FakeTime
+) -> None:
+    """A foreign program grabbing the hub while the manager's own reinstall
+    stop() is in flight must read as PROGRAM — not be swallowed as "ours",
+    and the manager must not end up stuck in PROGRAM when the agent owns
+    the hub again."""
+    transport.discover_results = [FakeHub()]
+    transport.park_stop = True
+    manager = make_manager(transport, sink, fake_time)
+    task = asyncio.create_task(manager.run())
+    try:
+        await run_until(manager, state=HubState.AGENT)
+        # The agent crashes; the auto-reinstall's stop() parks — and a
+        # foreign program grabs the hub inside that window.
+        transport._emit_status(StatusFlags(0))
+        await asyncio.sleep(0)  # reinstall task parks inside stop()
+        transport._emit_status(StatusFlags.USER_PROGRAM_RUNNING)
+        await poll_until(lambda: len(transport.install_calls) >= 2)
+        assert states(manager) == [
+            HubState.ADVERTISING,
+            HubState.AGENT,
+            HubState.PROGRAM,
+            HubState.AGENT,
+        ]
+        assert reasons(manager)[-2:] == ["user program started", "user program ended"]
+        # The reinstall's stop() ended the foreign program and the agent now
+        # owns the hub: final state AGENT, not a spurious stuck PROGRAM.
+        assert manager.state is HubState.AGENT
+    finally:
+        await cancel_quietly(task)
+
+
+async def test_late_status_snapshot_never_reads_agent_start_as_program(
+    transport: FakeTransport, sink: FakeSink, fake_time: FakeTime
+) -> None:
+    """The hub's running-flag SET may surface as a replayed snapshot at any
+    point after install_and_start resolves; only the agent's own live SET
+    edge must consume the expected-start latch."""
+    transport.discover_results = [FakeHub()]
+    manager = make_manager(transport, sink, fake_time)
+    task = asyncio.create_task(manager.run())
+    try:
+        await run_until(manager, state=HubState.AGENT)
+        # A late duplicate of the agent's own start snapshot (adapter
+        # replay, re-notification) — must not read as a user program.
+        transport._emit_status(StatusFlags.USER_PROGRAM_RUNNING)
+        await asyncio.sleep(0)
+        assert manager.state is HubState.AGENT
+        assert "user program started" not in reasons(manager)[-1:]
+    finally:
+        await cancel_quietly(task)
+
+
 # ---------------------------------------------------------------------------
 # BUSY sequencing (D6): stop() before install_and_start()
 # ---------------------------------------------------------------------------
@@ -686,6 +762,79 @@ async def test_fresh_parser_per_connect_malformed_count_resets(
 # ---------------------------------------------------------------------------
 # Session / transition logging (§4 rule 4)
 # ---------------------------------------------------------------------------
+
+
+async def test_unexpected_error_never_kills_loop(
+    sink: FakeSink, fake_time: FakeTime
+) -> None:
+    """R1: an unexpected exception (e.g. a RuntimeError from a buggy or
+    mismatched adapter) lands OFFLINE and the rescan continues — never
+    kills the always-on loop."""
+
+    class ExplodingTransport(FakeTransport):
+        async def discover(self, name: str, *, timeout: float = 10.0) -> DiscoveredHub:
+            raise RuntimeError("adapter exploded")
+
+    transport = ExplodingTransport()
+    manager = BLEManager(
+        transport,
+        sink,
+        config=BLEManagerConfig(agent_program=Path("agent_main.py")),
+        clock=fake_time.clock,
+        sleep=fake_time.sleep,
+    )
+    task = asyncio.create_task(manager.run())
+    try:
+        await poll_until(lambda: len(fake_time.sleeps) >= 3)
+        assert not task.done()
+        assert manager.state is HubState.OFFLINE
+        assert "unexpected error" in manager.state_reason
+    finally:
+        await cancel_quietly(task)
+
+
+async def test_disconnect_from_program_lands_offline_and_cancels_reinstall(
+    transport: FakeTransport, sink: FakeSink, fake_time: FakeTime
+) -> None:
+    """§4: any disconnect → OFFLINE, including from PROGRAM — and the
+    in-flight reinstall task must die with the session, not resurrect the
+    agent on a dead connection."""
+    transport.discover_results = [FakeHub()]
+    manager = make_manager(transport, sink, fake_time)
+    task = asyncio.create_task(manager.run())
+    try:
+        await run_until(manager, state=HubState.AGENT)
+        # Agent crash schedules a reinstall; before it lands, the hub drops.
+        transport._emit_status(StatusFlags(0))
+        await asyncio.sleep(0)
+        transport.fire_disconnect()
+        await run_until(manager, state=HubState.OFFLINE)
+        installs_before = len(transport.install_calls)
+        await asyncio.sleep(0.05)
+        # No post-disconnect install resurrection.
+        assert len(transport.install_calls) == installs_before
+        assert manager.state is HubState.OFFLINE
+        assert reasons(manager)[-1] == "hub disconnected"
+    finally:
+        await cancel_quietly(task)
+
+
+async def test_teardown_during_connect_releases_role(
+    transport: FakeTransport, sink: FakeSink, fake_time: FakeTime
+) -> None:
+    """Cancelling the manager while a connect attempt is in flight must
+    still release the BLE central role (run()'s finally runs from any
+    await point, ADVERTISING included)."""
+    transport.discover_results = [FakeHub()]
+    transport.connect_outcomes = [ConnectOutcome(hang=True)]
+    manager = make_manager(transport, sink, fake_time, connect_timeout=60.0)
+    task = asyncio.create_task(manager.run())
+    try:
+        await poll_until(lambda: "connect(Pybricks Hub)" in transport.ops)
+    finally:
+        await cancel_quietly(task)
+    assert "disconnect()" in transport.ops
+    assert manager.state is HubState.OFFLINE
 
 
 async def test_session_and_transition_logging(
