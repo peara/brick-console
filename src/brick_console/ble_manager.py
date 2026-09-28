@@ -87,6 +87,7 @@ __all__ = [
     "BLEManager",
     "BLEManagerConfig",
     "HubState",
+    "RawLineListener",
     "StateListener",
     "StateTransition",
     "TelemetryListener",
@@ -118,6 +119,11 @@ class StateTransition:
     reason: str
     session: int
 
+
+RawLineListener = Callable[[bytes], None]
+"""Notified with each raw stdout line (verbatim, terminator-stripped) —
+the WS gateway's live ``log`` fan-out. Malformed lines are included: raw
+retention is primary (D7) and the dashboard console pane shows them."""
 
 StateListener = Callable[[HubState, str, float], None]
 """Notified on every state change with ``(state, reason, timestamp)`` — the
@@ -236,6 +242,7 @@ class BLEManager:
         self._transitions: deque[StateTransition] = deque(maxlen=_TRANSITION_HISTORY)
         self._state_listeners: list[StateListener] = []
         self._telemetry_listeners: list[TelemetryListener] = []
+        self._raw_listeners: list[RawLineListener] = []
         self._backoff = _Backoff(
             base=self._config.backoff_base, ceiling=self._config.backoff_ceiling
         )
@@ -304,6 +311,23 @@ class BLEManager:
         def unsubscribe() -> None:
             with contextlib.suppress(ValueError):
                 self._telemetry_listeners.remove(listener)
+
+        return unsubscribe
+
+    def subscribe_raw(self, listener: RawLineListener) -> Callable[[], None]:
+        """Register for each raw stdout line (live ``log`` fan-out, D7
+        raw-log-primary: malformed lines included, terminator-stripped
+        verbatim bytes).
+
+        Returns an idempotent unsubscribe function. The store's raw-line
+        ring remains the authority for raw retention/history — this is the
+        live seam only.
+        """
+        self._raw_listeners.append(listener)
+
+        def unsubscribe() -> None:
+            with contextlib.suppress(ValueError):
+                self._raw_listeners.remove(listener)
 
         return unsubscribe
 
@@ -510,6 +534,8 @@ class BLEManager:
             return
         for raw, event in conn.parser.feed_with_raw(data):
             self._store.append_raw_line(raw)
+            for listener in tuple(self._raw_listeners):
+                _safe_call(listener, raw)
             logger.debug("hub stdout: %r", raw)
             if event is None:
                 continue  # malformed: counted and logged by the parser
