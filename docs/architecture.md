@@ -139,6 +139,7 @@ Runs as a systemd user service (`brick-console.service`, needs `loginctl enable-
 ## 6. Security posture
 
 - Bind to LAN + Tailscale interface; never 0.0.0.0 exposure to the internet.
+  - *Bind-policy decision (2026-09-28, recorded with the FastAPI skeleton):* the default bind is `0.0.0.0` behind the box's NAT — the "every interface" bind on a non-port-forwarded box is exactly the LAN + Tailscale audience, and it survives interface churn where explicit enumeration would crash or under-bind. The exposure boundary is the NAT/firewall, not the bind address; `BRICK_CONSOLE_HOST` remains the stricter escape hatch. Rationale: README ops note ("Bind policy: default `0.0.0.0` (NAT posture)").
 - Optional shared token header checked by FastAPI middleware (off by default, single-user LAN).
 - The hub is unauthenticated by design (LEGO/Pybricks constraint) — acceptable because the hub is only reachable within BLE range of a physically secured box.
 
