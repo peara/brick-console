@@ -259,6 +259,10 @@ class ClientQueue:
     async def get(self) -> dict[str, object]:
         return await self._queue.get()
 
+    def qsize(self) -> int:
+        """Current depth (test/observability access to the bounded slot)."""
+        return self._queue.qsize()
+
 
 # ---------------------------------------------------------------------------
 # The /ws route
@@ -350,16 +354,19 @@ async def _serve_client(
 
     # Join sequence (state → snapshot → replay), in D7 order.
     await websocket.send_json(state_envelope(hub(), source.state, source.state_reason))
+    snapshot_sent = False
     if store is not None and store.hub_info is not None:
         await websocket.send_json(telemetry_envelope(hub(), store.hub_info))
+        snapshot_sent = True
     if store is not None:
         count = store.event_capacity if replay is None else replay
-        joined = [
-            (ordinal, event)
-            for ordinal, event in store.replay_events(count)
-            if ordinal < boundary
-        ]
-        for _ordinal, event in joined:
+        for ordinal, event in store.replay_events(count):
+            if ordinal >= boundary:
+                continue  # post-boundary: arrives live instead
+            if snapshot_sent and isinstance(event, HubInfo):
+                # D7: hub_info is once-per-connect — already delivered as
+                # the snapshot (the cache mirrors the appended event).
+                continue
             await websocket.send_json(telemetry_envelope(hub(), event))
 
     # Live stream: one sender task drains the bounded queue in order.
