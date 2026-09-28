@@ -11,10 +11,11 @@ Manager wiring today: a *stub*, per the issue ("the manager handle can be
 a stub now"). The real manager needs the hub-side agent program
 (``agent/agent_main.py``, not yet landed) to install; until then the run
 command serves with ``StubManager`` — hub state pinned to ``offline``, no
-BLE touched. When the agent lands, this stub is replaced by constructing
-the real ``BLEManager`` over the bleak adapter (:mod:`brick_console.adapter`)
-and the ``TelemetryStore`` (:mod:`brick_console.store`) — the seams
-already exist and are injected through ``create_app`` (no globals).
+BLE touched. The telemetry store *is* wired for real (a stub manager
+produces no telemetry, but the store seam is ready for the WS-gateway
+deliverable to consume on ``app.state``). When the agent lands, the stub
+is replaced by constructing the real ``BLEManager`` over the bleak adapter
+(:mod:`brick_console.adapter`) — same injected seams, zero app changes.
 
 Configuration (environment):
 
@@ -30,19 +31,27 @@ for ``journalctl`` (timestamps, level, client address on access lines); no
 extra JSON formatter (M1: keep it simple, the unit's deliverable documents
 what lands in the journal). The manager task logs through the same config.
 
-Exit code 0 on clean shutdown (SIGTERM from systemd → uvicorn handles →
-lifespan cancels the manager task); anything else is a crash the unit's
-``Restart=on-failure`` will retry — R1 applies to the whole service.
+Exit behavior: SIGINT exits 0. SIGTERM triggers uvicorn's graceful shutdown
+(lifespan cancels the manager task, port released) and then exits 143 —
+uvicorn re-raises the captured signal after the graceful sequence; that is
+upstream ``capture_signals`` behavior, not a crash. For systemd this is
+correct-and-safe: dying by its stop signal counts as a clean stop, so the
+unit's ``Restart=always`` neither loops nor marks the service failed. A
+configuration typo (invalid port) exits non-zero before any socket is
+opened — systemd's restart backoff handles that without port flapping.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as pkg_version
 
 import uvicorn
 
 from brick_console.app import create_app
+from brick_console.store import TelemetryStore
 
 __all__ = [
     "DEFAULT_HOST",
@@ -58,6 +67,17 @@ a box that is not port-forwarded; exposure is LAN/Tailscale only (§6)."""
 
 DEFAULT_PORT = 8300
 """Default port pinned by the issue; overridable via ``BRICK_CONSOLE_PORT``."""
+
+
+def _package_version() -> str:
+    """The installed distribution's version — /healthz must report what is
+    actually running, not a literal that drifts on the next version bump."""
+    try:
+        return pkg_version("brick-console")
+    except PackageNotFoundError:
+        # Not installed (e.g. PYTHONPATH-style use without uv sync): fall
+        # back to the source tree's declared version.
+        return "0.1.0"
 
 
 class StubManager:
@@ -93,25 +113,20 @@ class StubManager:
 
 def bind_config(env: dict[str, str] | None = None) -> tuple[str, int]:
     """Resolve ``(host, port)`` from the environment (or the given mapping,
-    for tests). Port parsing is strict: a non-integer or out-of-range
-    ``BRICK_CONSOLE_PORT`` crashes at startup with a clear message — a
-    server silently binding to the default port after the operator
-    explicitly asked for another is worse than a fail-fast (fail loudly,
-    R1's spirit: the service must come up correctly, or not at all).
+    for tests). Port parsing is strict: anything other than a plain
+    integer string in 1-65535 — no whitespace, no sign, no decimal —
+    crashes at startup with a clear message. A server silently binding to
+    the default port after the operator explicitly asked for another is
+    worse than a fail-fast (fail loudly, R1's spirit: the service must
+    come up correctly, or not at all).
     """
     env = os.environ if env is None else env
     host = env.get("BRICK_CONSOLE_HOST", DEFAULT_HOST)
     port_raw = env.get("BRICK_CONSOLE_PORT", str(DEFAULT_PORT))
-    try:
-        port = int(port_raw)
-    except ValueError as exc:
-        raise SystemExit(
-            f"brick-console: invalid BRICK_CONSOLE_PORT={port_raw!r} — must be an integer"
-        ) from exc
-    if not 1 <= port <= 65535:
+    if not (port_raw.isdigit() and 1 <= (port := int(port_raw)) <= 65535):
         raise SystemExit(
             f"brick-console: invalid BRICK_CONSOLE_PORT={port_raw!r} — "
-            f"must be within 1-65535, got {port}"
+            f"must be a plain integer within 1-65535"
         )
     return host, port
 
@@ -119,7 +134,10 @@ def bind_config(env: dict[str, str] | None = None) -> tuple[str, int]:
 def main() -> None:
     """Console-script entry point (``[project.scripts]`` → ``brick-console``)."""
     host, port = bind_config()
-    app = create_app(StubManager())
+    # Real store wired even under the stub manager: the WS-gateway
+    # deliverable consumes app.state.store, so production must never hold
+    # None there (a stub manager leaves it empty, not absent).
+    app = create_app(StubManager(), store=TelemetryStore(), version=_package_version())
     # uvicorn's default logging config (log_config untouched) is the
     # journalctl story: formatted INFO lines — startup, shutdown, access —
     # on stderr, which systemd captures. Passing log_config=None would

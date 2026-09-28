@@ -139,7 +139,6 @@ def create_app(
     store: TelemetryStore | None = None,
     version: str = "0.1.0",
     static_dir: Path | None = None,
-    clock: Callable[[], float] = time.time,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> FastAPI:
     """Build the FastAPI app with the manager seam injected (no globals).
@@ -151,22 +150,23 @@ def create_app(
     retrying is the manager's own loop's job (R1), not the app's crash.
 
     ``store`` is the injected telemetry-store handle (the ring buffer the
-    WS gateway will replay from, architecture §2.1): stored on ``app.state``
-    for the WS-gateway deliverable to consume — no globals. ``None`` lets
-    tests build a bare app without a store; the run command passes a real
-    one.
+    WS gateway will replay from, architecture §2.1): stored on
+    ``app.state`` for the WS-gateway deliverable to consume — no globals.
+    ``None`` builds a bare app (the run command passes a real one).
 
     ``static_dir`` overrides the packaged dashboard directory (default
     ``src/brick_console/static/``) — tests point it at fixtures instead of
-    mutating the package. ``clock`` is kept for the same injectability
-    discipline as the BLE manager (tests pass fakes); only ``monotonic``
-    feeds uptime, so tests pass deterministic monotonic fakes.
+    mutating the package. The override must exist: ``check_dir=True``
+    fails the factory loudly on a bad path rather than serving 500s at
+    request time (the packaged default always exists; an empty override
+    dir still boots and 404s). ``monotonic`` feeds uptime; tests pass
+    deterministic fakes (the same injectable-clock discipline as the BLE
+    manager, testing.md).
     """
     app = FastAPI(title="brick-console", version=version, lifespan=_lifespan)
     app.state.manager = manager
     app.state.store = store
     app.state.version = version
-    app.state.clock = clock
     app.state.monotonic = monotonic
     # Fallback if a request runs outside the lifespan context (uptime then
     # counts from factory time); the lifespan re-stamps on startup.
@@ -175,21 +175,25 @@ def create_app(
 
     @app.get("/healthz")
     async def healthz() -> dict[str, object]:
+        # Read the seams through app.state (not the factory closure) so
+        # every consumer — endpoint, WS gateway, tests — sees one source
+        # of truth if a handle is ever re-wired on the state object.
         return healthz_payload(
-            manager.state,
-            manager.state_reason,
+            app.state.manager.state,
+            app.state.manager.state_reason,
             started_at=app.state.started_at,
             now=app.state.monotonic(),
             version=app.state.version,
         )
 
     # Fallback mount last: routes registered above win over files; the
-    # dashboard lands as plain files under static_dir. check_dir=False:
-    # the directory may be empty until the dashboard files land — the
-    # mount itself must never crash the service on boot.
+    # dashboard lands as plain files under static_dir. check_dir=True: a
+    # bad static_dir fails at factory time (loud, early) instead of
+    # answering 500 on every static request later; the packaged default
+    # ships with index.html so it always passes the check.
     app.mount(
         "/",
-        StaticFiles(directory=static_dir or _STATIC_DIR, html=True, check_dir=False),
+        StaticFiles(directory=static_dir or _STATIC_DIR, html=True, check_dir=True),
         name="static",
     )
     return app

@@ -291,6 +291,15 @@ def test_missing_static_file_is_404_not_500(tmp_path) -> None:
         assert client.get("/nope.js").status_code == 404
 
 
+def test_nonexistent_static_dir_fails_at_factory_time(tmp_path) -> None:
+    # check_dir=True: a bad static_dir must fail loudly at create_app
+    # (RuntimeError), never boot a server whose every static request
+    # would 500. The packaged default always exists, so only a bad
+    # override hits this.
+    with pytest.raises(RuntimeError, match="does not exist"):
+        create_app(FakeManager(), static_dir=tmp_path / "nope")
+
+
 # ---------------------------------------------------------------------------
 # Run command — bind config honored by the entry point
 # ---------------------------------------------------------------------------
@@ -323,7 +332,9 @@ def test_bind_config_invalid_port_fails_fast() -> None:
 
 def test_run_module_wires_app_to_entry_point(monkeypatch: pytest.MonkeyPatch) -> None:
     # The console script target is brick_console.run:main; main() must
-    # resolve host/port from the env and hand uvicorn the built app.
+    # resolve host/port from the env, wire the real store seam, and hand
+    # uvicorn the built app — production must never serve with
+    # app.state.store None (the WS-gateway deliverable consumes it).
     import brick_console.run as run_mod
 
     captured: dict[str, object] = {}
@@ -341,7 +352,13 @@ def test_run_module_wires_app_to_entry_point(monkeypatch: pytest.MonkeyPatch) ->
 
     assert captured["host"] == "127.0.0.1"
     assert captured["port"] == 9100
-    assert captured["app"].title == "brick-console"
+    app = captured["app"]
+    assert app.title == "brick-console"
+    # The store seam is wired for real in production.
+    assert isinstance(app.state.store, TelemetryStore)
+    # /healthz reports the installed distribution's version, not a literal.
+    assert app.state.version == run_mod._package_version()
+    assert isinstance(app.state.version, str) and app.state.version
 
 
 # ---------------------------------------------------------------------------
@@ -394,3 +411,30 @@ def test_bind_config_port_range_enforced() -> None:
     for bad in ("99999", "-1", "0"):
         with pytest.raises(SystemExit, match="1-65535"):
             bind_config({"BRICK_CONSOLE_PORT": bad})
+
+
+def test_bind_config_rejects_padded_port_strings() -> None:
+    # int() alone tolerates " 9" — strict parsing must not: a padded env
+    # value is an operator typo, and port 9 would then fail at bind time
+    # with an opaque permission error instead of a clear message.
+    from brick_console.run import bind_config
+
+    for bad in (" 9", "9 ", "  8300\t", "+8300"):
+        with pytest.raises(SystemExit, match="1-65535"):
+            bind_config({"BRICK_CONSOLE_PORT": bad})
+
+
+def test_healthz_reads_manager_through_app_state() -> None:
+    # The endpoint reads app.state.manager, not the factory closure: swap
+    # the handle on the state object and /healthz must reflect the swap —
+    # every consumer (endpoint, WS gateway) sees one source of truth.
+    manager = FakeManager(state="offline", state_reason="a")
+    app = create_app(manager)
+
+    with TestClient(app) as client:
+        before = client.get("/healthz").json()["hub"]
+        app.state.manager = FakeManager(state="agent", state_reason="b")
+        after = client.get("/healthz").json()["hub"]
+
+    assert before == {"state": "offline", "reason": "a"}
+    assert after == {"state": "agent", "reason": "b"}
