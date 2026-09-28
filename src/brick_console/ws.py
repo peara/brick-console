@@ -324,9 +324,11 @@ async def _serve_client(
     every pre-boundary event is replayed, every post-boundary one arrives
     live (no gap, no duplicate; see the module docstring).
 
-    Cleanup is unconditional (``finally``): the sender task is cancelled
-    and joined, and every subscription is unsubscribed (idempotent) — a
-    disconnected client leaves no queue, no task, no ghost listener.
+    Cleanup is genuinely unconditional: the ``try`` starts right after
+    the subscriptions (join sends included) and the ``finally``
+    unsubscribes FIRST — a client that vanishes mid-join, or a sender
+    task that dies with a stored exception, leaves no listener, no task,
+    no queue behind.
     """
     queue = ClientQueue()
 
@@ -351,27 +353,31 @@ async def _serve_client(
         source.subscribe_telemetry(on_telemetry),
         source.subscribe_raw(on_raw),
     ]
-
-    # Join sequence (state → snapshot → replay), in D7 order.
-    await websocket.send_json(state_envelope(hub(), source.state, source.state_reason))
-    snapshot_sent = False
-    if store is not None and store.hub_info is not None:
-        await websocket.send_json(telemetry_envelope(hub(), store.hub_info))
-        snapshot_sent = True
-    if store is not None:
-        count = store.event_capacity if replay is None else replay
-        for ordinal, event in store.replay_events(count):
-            if ordinal >= boundary:
-                continue  # post-boundary: arrives live instead
-            if snapshot_sent and isinstance(event, HubInfo):
-                # D7: hub_info is once-per-connect — already delivered as
-                # the snapshot (the cache mirrors the appended event).
-                continue
-            await websocket.send_json(telemetry_envelope(hub(), event))
-
-    # Live stream: one sender task drains the bounded queue in order.
-    sender = asyncio.create_task(_send_loop(websocket, queue), name="ws-sender")
+    sender: asyncio.Task[None] | None = None
     try:
+        # Join sequence (state → snapshot → replay), in D7 order — inside
+        # the try so a mid-join send failure still unsubscribes (no leak).
+        await websocket.send_json(
+            state_envelope(hub(), source.state, source.state_reason)
+        )
+        snapshot_sent = False
+        if store is not None and store.hub_info is not None:
+            await websocket.send_json(telemetry_envelope(hub(), store.hub_info))
+            snapshot_sent = True
+        if store is not None:
+            count = store.event_capacity if replay is None else replay
+            for ordinal, event in store.replay_events(count):
+                if ordinal >= boundary:
+                    continue  # post-boundary: arrives live instead
+                if snapshot_sent and isinstance(event, HubInfo):
+                    # D7: hub_info is once-per-connect — already delivered
+                    # as the snapshot (the cache mirrors the appended
+                    # event).
+                    continue
+                await websocket.send_json(telemetry_envelope(hub(), event))
+
+        # Live stream: one sender task drains the bounded queue in order.
+        sender = asyncio.create_task(_send_loop(websocket, queue), name="ws-sender")
         while True:
             message = await websocket.receive()
             if message.get("type") == "websocket.disconnect":
@@ -381,27 +387,37 @@ async def _serve_client(
     except WebSocketDisconnect:
         pass  # starlette variants raise instead of returning the message
     finally:
-        sender.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await sender
+        # Unsubscribe FIRST and unconditionally: a join-phase send failure
+        # or a sender task that died with a stored exception must never
+        # skip listener cleanup (no ghost fan-out into a dead queue).
         for unsubscribe in unsubs:
             unsubscribe()
+        if sender is not None:
+            sender.cancel()
+            # Swallow every exit the sender can take: cancelled, returned
+            # quietly on a dying socket, or dead with a stored exception
+            # raised by the ASGI send (e.g. ConnectionResetError racing a
+            # normal disconnect). Retrieving it here also prevents the
+            # "Task exception was never retrieved" journal noise.
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await sender
 
 
 async def _send_loop(websocket: WebSocket, queue: ClientQueue) -> None:
     """Drain one client's queue to the socket, in order, forever.
 
-    A send failure means the socket is dying: log and exit — the handler's
-    receive loop observes the disconnect and runs the shared cleanup; a
-    raising sender would leave the handler waiting on a dead queue.
+    A send failure means the socket is dying: log and exit quietly. The
+    handler's receive loop observes the disconnect and runs the shared
+    cleanup — and its ``finally`` retrieves this task's exit whatever it
+    was, so even an unexpected send exception never leaks listeners.
     """
     while True:
         envelope = await queue.get()
         try:
             await websocket.send_json(envelope)
-        except (RuntimeError, WebSocketDisconnect):
-            # Starlette raises either on a dead/dying session: exit quietly —
-            # the receive loop runs the shared cleanup.
+        except (RuntimeError, WebSocketDisconnect, OSError):
+            # The socket is going away (starlette raises either type on a
+            # dead/dying session; OSError covers transport-level resets).
             logger.debug("ws send failed (client going away); sender exiting")
             return
 

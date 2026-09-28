@@ -23,6 +23,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 
+import pytest
 from fastapi.testclient import TestClient
 
 from brick_console.app import create_app
@@ -109,12 +110,6 @@ def make_client(
     store = store if store is not None else TelemetryStore()
     app = create_app(manager, store=store)
     return TestClient(app), manager, store
-
-
-async def settle(client: TestClient) -> None:
-    """One loop round-trip so queued live envelopes reach the socket."""
-    await client.portal.call(asyncio.sleep, 0)
-    await client.portal.call(asyncio.sleep, 0)
 
 
 def seeded_store() -> TelemetryStore:
@@ -620,6 +615,72 @@ def test_disconnect_no_ghost_sends_after_unsubscribe() -> None:
         "telemetry",
     ]
     assert got[0]["data"]["state"] == "agent"  # current manager state, fresh
+
+
+def test_join_phase_failure_still_cleans_up_subscriptions() -> None:
+    # Regression (review round 1): the join sends sat outside the
+    # try/finally — any join-phase raise leaked the three listeners
+    # into the manager forever. hub_info raising simulates a mid-join
+    # failure before any client read.
+    manager = FakeManager()
+    store = seeded_store()
+
+    class ExplodingStore(TelemetryStore):
+        @property
+        def hub_info(self):
+            raise RuntimeError("simulated join-phase failure")
+
+    app = create_app(manager, store=store)
+    app.state.store = ExplodingStore()
+    client = TestClient(app)
+
+    with (
+        client,
+        pytest.raises(RuntimeError, match="simulated join-phase failure"),
+        client.websocket_connect("/ws") as ws,
+    ):
+        ws.receive_json()  # never reached: the join raises first
+
+    # The portal is gone with the client; the handler's finally ran
+    # during the exception unwind, so the counts must already be zero.
+    assert manager.listener_counts == (0, 0, 0)  # no leaked listeners
+
+
+def test_sender_task_exception_retrieved_not_leaked() -> None:
+    # Regression (review round 1): the finally awaited the sender
+    # suppressing only CancelledError — a sender dead with a stored
+    # exception re-raised out of the finally, skipping the unsubscribes.
+    manager = FakeManager()
+    store = seeded_store()
+    app = create_app(manager, store=store)
+    client = TestClient(app)
+
+    async def exploding_send_loop(websocket, queue):
+        raise ConnectionResetError("simulated transport reset")
+
+    from brick_console import ws as ws_mod
+
+    original = ws_mod._send_loop
+    ws_mod._send_loop = exploding_send_loop
+    try:
+        with client:
+            with client.websocket_connect("/ws") as ws:
+                got = [ws.receive_json() for _ in range(5)]  # full join
+                # The sender task raises almost immediately; the receive
+                # loop keeps waiting until the context close disconnects.
+            import asyncio as _a
+
+            client.portal.call(_a.sleep, 0)
+            assert manager.listener_counts == (0, 0, 0)  # cleanup still ran
+    finally:
+        ws_mod._send_loop = original
+    assert [e["type"] for e in got] == [
+        "state",
+        "telemetry",
+        "telemetry",
+        "telemetry",
+        "telemetry",
+    ]
 
 
 def test_mock_disconnect_stops_cadence_task() -> None:
