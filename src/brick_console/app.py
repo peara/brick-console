@@ -31,8 +31,9 @@ no Node toolchain (architecture §8: "no build tooling for M1").
 registered before the mount win, so ``/healthz`` (and the WebSocket route,
 added with the WS-gateway deliverable) take precedence over files.
 ``html=True`` gives the single-page dashboard its ``/`` → ``index.html``
-entry; ``check_dir=False`` keeps the service booting while the static dir
-is still empty (the dashboard deliverable fills it in a later PR).
+entry; the directory must exist (``check_dir=True`` fails the factory
+loudly on a bad override — the packaged default ships with the
+placeholder, and an empty-but-existing override dir still boots and 404s).
 
 Uptime: monotonic, not wall-clock (``time.monotonic()`` delta from lifespan
 start) so NTP jumps or suspend/resume can never make the reported uptime

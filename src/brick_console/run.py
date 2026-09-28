@@ -123,7 +123,14 @@ def bind_config(env: dict[str, str] | None = None) -> tuple[str, int]:
     env = os.environ if env is None else env
     host = env.get("BRICK_CONSOLE_HOST", DEFAULT_HOST)
     port_raw = env.get("BRICK_CONSOLE_PORT", str(DEFAULT_PORT))
-    if not (port_raw.isdigit() and 1 <= (port := int(port_raw)) <= 65535):
+    # isascii() matters: str.isdigit() alone accepts Unicode digit
+    # characters (superscript "²") that int() then rejects — an uncaught
+    # ValueError instead of the promised clean SystemExit.
+    if not (
+        port_raw.isascii()
+        and port_raw.isdigit()
+        and 1 <= (port := int(port_raw)) <= 65535
+    ):
         raise SystemExit(
             f"brick-console: invalid BRICK_CONSOLE_PORT={port_raw!r} — "
             f"must be a plain integer within 1-65535"

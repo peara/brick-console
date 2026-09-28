@@ -417,9 +417,11 @@ def test_bind_config_rejects_padded_port_strings() -> None:
     # int() alone tolerates " 9" — strict parsing must not: a padded env
     # value is an operator typo, and port 9 would then fail at bind time
     # with an opaque permission error instead of a clear message.
+    # Unicode digit characters ("²" parses as isdigit() but breaks int();
+    # "٣" parses to 3) are rejected the same way: plain ASCII only.
     from brick_console.run import bind_config
 
-    for bad in (" 9", "9 ", "  8300\t", "+8300"):
+    for bad in (" 9", "9 ", "  8300\t", "+8300", "²", "٣", "1_0"):
         with pytest.raises(SystemExit, match="1-65535"):
             bind_config({"BRICK_CONSOLE_PORT": bad})
 
