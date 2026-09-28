@@ -70,7 +70,7 @@ class StubManager:
     """
 
     def __init__(self) -> None:
-        self._park = asyncio.Event()
+        self.started = 0
 
     @property
     def state(self) -> str:
@@ -81,16 +81,23 @@ class StubManager:
         return "manager not wired yet (stub)"
 
     async def run(self) -> None:
-        await self._park.wait()
+        # Per-invocation park latch: an asyncio.Event created outside the
+        # loop binds to the first loop that awaits it, so a second lifespan
+        # on the same app (uvicorn --reload, or a test re-entering a
+        # client) would hit "Event is bound to a different event loop" and
+        # silently kill the manager task. Creating it inside run() binds it
+        # to the current loop every time.
+        self.started += 1
+        await asyncio.Event().wait()
 
 
 def bind_config(env: dict[str, str] | None = None) -> tuple[str, int]:
     """Resolve ``(host, port)`` from the environment (or the given mapping,
-    for tests). Port parsing is strict: an invalid ``BRICK_CONSOLE_PORT``
-    crashes at startup with a clear message — a server silently binding to
-    the default port after the operator explicitly asked for another is
-    worse than a fail-fast (fail loudly, R1's spirit: the service must come
-    up correctly, or not at all).
+    for tests). Port parsing is strict: a non-integer or out-of-range
+    ``BRICK_CONSOLE_PORT`` crashes at startup with a clear message — a
+    server silently binding to the default port after the operator
+    explicitly asked for another is worse than a fail-fast (fail loudly,
+    R1's spirit: the service must come up correctly, or not at all).
     """
     env = os.environ if env is None else env
     host = env.get("BRICK_CONSOLE_HOST", DEFAULT_HOST)
@@ -101,6 +108,11 @@ def bind_config(env: dict[str, str] | None = None) -> tuple[str, int]:
         raise SystemExit(
             f"brick-console: invalid BRICK_CONSOLE_PORT={port_raw!r} — must be an integer"
         ) from exc
+    if not 1 <= port <= 65535:
+        raise SystemExit(
+            f"brick-console: invalid BRICK_CONSOLE_PORT={port_raw!r} — "
+            f"must be within 1-65535, got {port}"
+        )
     return host, port
 
 

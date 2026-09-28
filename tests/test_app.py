@@ -342,3 +342,55 @@ def test_run_module_wires_app_to_entry_point(monkeypatch: pytest.MonkeyPatch) ->
     assert captured["host"] == "127.0.0.1"
     assert captured["port"] == 9100
     assert captured["app"].title == "brick-console"
+
+
+# ---------------------------------------------------------------------------
+# StubManager — the manager production actually runs today
+# ---------------------------------------------------------------------------
+
+
+def test_stub_manager_parks_and_survives_two_lifespans() -> None:
+    # Regression: an asyncio.Event created in StubManager.__init__ bound to
+    # the first loop that awaited it; a second lifespan on the same app
+    # (uvicorn --reload, a test re-entering a client) hit "Event is bound
+    # to a different event loop" and silently killed the manager task.
+    # The park latch must be per-run() so every lifespan gets its own loop.
+    from brick_console.run import StubManager
+
+    stub = StubManager()
+    app = create_app(stub)
+
+    with TestClient(app) as client:
+        assert stub.started == 1
+        body = client.get("/healthz").json()
+    assert body["hub"] == {"state": "offline", "reason": "manager not wired yet (stub)"}
+
+    # Second lifespan, fresh event loop: the stub must park again, not die.
+    with TestClient(app) as client:
+        assert stub.started == 2
+        assert client.get("/healthz").json()["hub"]["state"] == "offline"
+        assert app.state.manager_task is not None
+        assert not app.state.manager_task.done()
+
+
+def test_stub_manager_start_reason_matches_healthz() -> None:
+    # The stub's contract: hub pinned offline, reason names the stub —
+    # /healthz must surface exactly this until the real manager lands.
+    from brick_console.run import StubManager
+
+    stub = StubManager()
+    with TestClient(create_app(stub)) as client:
+        body = client.get("/healthz").json()
+
+    assert body["hub"]["state"] == stub.state
+    assert body["hub"]["reason"] == stub.state_reason == "manager not wired yet (stub)"
+
+
+def test_bind_config_port_range_enforced() -> None:
+    # Out-of-range ports fail fast with a clear message (the documented
+    # promise), not an ugly socket error later at bind time.
+    from brick_console.run import bind_config
+
+    for bad in ("99999", "-1", "0"):
+        with pytest.raises(SystemExit, match="1-65535"):
+            bind_config({"BRICK_CONSOLE_PORT": bad})
