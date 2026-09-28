@@ -23,8 +23,10 @@ import logging
 from pathlib import Path
 
 import pytest
+from bleak.exc import BleakGATTProtocolError
 from pybricksdev.ble.pybricks import StatusFlag
 from pybricksdev.connections import ConnectionState
+from pybricksdev.connections.pybricks import HubDisconnectError
 from reactivex.subject import BehaviorSubject, Subject
 
 import brick_console.adapter as adapter_module
@@ -40,7 +42,6 @@ SYNTHETIC_WORD = (
     | int(StatusFlag.BLE_HOST_CONNECTED)
     | (1 << 20)
 )
-SYNTHETIC_FLAGS = StatusFlags(SYNTHETIC_WORD)
 
 
 class FakeBLEDevice:
@@ -83,6 +84,9 @@ class FakePybricksHubBLE:
         self.connect_delay: float = 0.0
         self.connect_error: Exception | None = None
         self.disconnect_error: Exception | None = None
+        self.run_error: Exception | None = None
+        self.stop_error: Exception | None = None
+        self.write_error: Exception | None = None
         self.print_output_at_connect: bool | None = None
         self._running_program = 0
         self._selected_slot = 0
@@ -127,12 +131,18 @@ class FakePybricksHubBLE:
                 },
             )
         )
+        if self.run_error is not None:
+            raise self.run_error
 
     async def stop_user_program(self) -> None:
         self.calls.append(CallRecord("stop_user_program"))
+        if self.stop_error is not None:
+            raise self.stop_error
 
     async def write_string(self, value: str) -> None:
         self.calls.append(CallRecord("write_string", {"value": value}))
+        if self.write_error is not None:
+            raise self.write_error
 
     def drop_connection(self, *, power_button: bool = False) -> None:
         """Simulate a spontaneous drop — the bleak disconnected callback
@@ -218,13 +228,14 @@ async def test_discover_wraps_device_name_and_address(monkeypatch) -> None:
 
 
 async def test_discover_timeout_passes_through(monkeypatch) -> None:
-    # TimeoutError is the "hub off/asleep" signal — never retyped.
+    # TimeoutError (asyncio.TimeoutError's 3.12 alias) is the "hub
+    # off/asleep" signal — never retyped (gotcha 5).
     async def fake_find_device(name=None, service=None, timeout=None):
         raise TimeoutError()
 
     monkeypatch.setattr("brick_console.adapter.find_device", fake_find_device)
     transport = PybricksDevTransport()
-    with pytest.raises(asyncio.TimeoutError):
+    with pytest.raises(TimeoutError):
         await transport.discover("Pybricks Hub")
 
 
@@ -310,6 +321,44 @@ async def test_install_and_start_pins_run_flags() -> None:
         "print_output": False,
         "line_handler": False,
     }
+
+
+async def test_busy_gatt_error_propagates_untouched() -> None:
+    # D6: BUSY (CommandError.BUSY on a bleak GATT write, while a user
+    # program runs) is a caller-side precondition — the adapter must not
+    # retype or swallow it. It surfaces as a bleak protocol error, NOT a
+    # ConnectionError: stop-before-install sequencing is the manager's
+    # job, and the manager detects the failure by its original type.
+    h = make_transport()
+    handle = DiscoveredPybricksHub(h.device)
+    await h.transport.connect(handle, on_disconnect=_DisconnectCounter())
+    busy = BleakGATTProtocolError("CommandError.BUSY (0x81)")
+    h.hub.run_error = busy
+    with pytest.raises(BleakGATTProtocolError, match="BUSY"):
+        await h.transport.install_and_start(Path("agent_main.py"))
+    # Same for stop()/write_stdin(): a plain GATT failure is not a drop.
+    h.hub.stop_error = busy
+    with pytest.raises(BleakGATTProtocolError):
+        await h.transport.stop()
+    h.hub.write_error = busy
+    with pytest.raises(BleakGATTProtocolError):
+        await h.transport.write_stdin(b"x")
+
+
+async def test_disconnect_errors_surface_as_connection_error() -> None:
+    # HubDisconnectError/HubPowerButtonPressedError mid-operation are
+    # drops, not crashes — surfaced as ConnectionError (the never-give-up
+    # loop's catch), while the bridge fires on_disconnect in parallel.
+    h = make_transport()
+    handle = DiscoveredPybricksHub(h.device)
+    counter = _DisconnectCounter()
+    await h.transport.connect(handle, on_disconnect=counter)
+    h.hub.run_error = HubDisconnectError("disconnected during operation")
+    with pytest.raises(ConnectionError, match="disconnected during install"):
+        await h.transport.install_and_start(Path("agent_main.py"))
+    # The drop also fires the bridge (exactly once overall).
+    h.hub.drop_connection()
+    assert counter.count == 1
 
 
 async def test_stop_maps_to_stop_user_program() -> None:
