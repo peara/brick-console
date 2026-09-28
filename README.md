@@ -38,6 +38,17 @@ uv run ruff check .                      # lint
 
 The hub runs Pybricks v4.0.1. Original LEGO firmware backup lives outside the repo at `~/hermes/m5stack/backups/lego-original-inventor-hub.bin` (md5 `d0c76999…`). To restore: hub in DFU mode (hold Bluetooth button + plug USB), then `uv run pybricksdev dfu restore <backup-file>`.
 
+## Ops notes
+
+### Bind policy: default `0.0.0.0` (NAT posture)
+
+The console binds `0.0.0.0:8300` by default. **Decision + rationale:** the server box sits behind NAT with no port forwarding, so binding every interface in practice exposes the console to exactly its intended audience — the LAN and the Tailscale network (architecture §6) — and `0.0.0.0` survives interface churn (Tailscale IP changes, `tailscaled` not yet up at boot, Ethernet plugged/unplugged) with zero configuration, where explicit interface enumeration would crash on boot or silently under-bind whenever an address drifts. The exposure boundary is the box's NAT/firewall, not the bind address: keep port 8300 un-forwarded and LAN-firewalled, and never expose the console to the public internet (it is unauthenticated by design; the optional shared-token middleware is M2+, off by default). `BRICK_CONSOLE_HOST` (e.g. `127.0.0.1` or a specific interface address) is the escape hatch for a stricter posture when needed.
+
+```bash
+uv run brick-console                    # serve on 0.0.0.0:8300 (defaults)
+BRICK_CONSOLE_HOST=127.0.0.1 BRICK_CONSOLE_PORT=9000 uv run brick-console
+```
+
 ## Repository layout
 
 ```
