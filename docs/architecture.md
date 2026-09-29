@@ -120,6 +120,7 @@ Rules:
 2. Program end (normal, crash, or Stop) is detected via the hub status event (`USER_PROGRAM_RUNNING` flag clearing — `Transport.subscribe_status`, review finding 1); the server then reinstalls the agent automatically.
 3. Hub power-cycle → full reconnect path with fresh agent install; total time budget ≤ 5 s.
 4. All state transitions logged with timestamps. A **session** = one connect→disconnect episode; **session history** = the timestamped transitions of such episodes.
+5. A parked session (AGENT) is kept alive by a liveness probe (`Transport.probe()`, D8): every ~5 s a benign characteristic read bounds the drop-event wait. A failed probe plus disconnect-callback silence past a ~2 s grace window means the hub was taken by an external central (the kick produces no disconnect event at all on this stack — D8 evidence) → OFFLINE with the canonical reason `"external client took the hub"`, which the dashboard renders as the EXTERNAL overlay. A callback within the window is the ordinary `hub disconnected` path (power-off fires it).
 
 ## 4.5 BLE manager service (M1 concrete plan)
 
