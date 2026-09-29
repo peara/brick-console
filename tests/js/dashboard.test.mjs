@@ -5,8 +5,9 @@
 // Done-when: "stale-marking dims values after cadence timeout (fake clock
 // in tests)").
 //
-// Run: node --test tests/js/   (local dev gate; CI runs it too — see the
-// PR body's delegated-decision note.)
+// Run: node --test tests/js/dashboard.test.mjs   (local dev gate — the JS
+// suite is NOT wired into the uv-only CI; see the PR body's delegated-
+// decision note for the rationale and the deviation record.)
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -15,15 +16,19 @@ import {
   appendLog,
   applyEnvelope,
   chipView,
+  formatAge,
   formatPortValue,
   initialDashboard,
   isDimmed,
   isExternalTakeoverReason,
   isMockMode,
+  logSyncPlan,
   LOG_SCROLLBACK,
   nextExternalOverlay,
   nextReconnectDelay,
   portRows,
+  seenStamp,
+  seenText,
   staleness,
   STALE_MS,
   wsUrl,
@@ -524,6 +529,79 @@ test("appendLog honors a custom cap", () => {
     logs = appendLog(logs, `l${i}`, 3);
   }
   assert.deepEqual(logs, ["l2", "l3", "l4"]);
+});
+
+test("log envelopes advance logSeq — the cap keeps length flat, the seq does not", () => {
+  // The DOM-sync bug class this exists to prevent: at the ring's cap the
+  // array length never grows, so only the monotonic counter can signal
+  // that new lines landed. applyLog must advance it on every line.
+  let dash = initialDashboard();
+  for (let i = 0; i < LOG_SCROLLBACK + 5; i++) {
+    dash = applyEnvelope(dash, logEnvelope(`line ${i}`), i);
+  }
+  assert.equal(dash.logs.length, LOG_SCROLLBACK);
+  assert.equal(dash.logSeq, LOG_SCROLLBACK + 5);
+  assert.deepEqual(dash.logs[0], "line 5"); // oldest five dropped
+  assert.deepEqual(dash.logs.at(-1), `line ${LOG_SCROLLBACK + 4}`);
+});
+
+test("logSyncPlan: the DOM-sync decision for the log pane (cap regression)", () => {
+  // Nothing new: no work.
+  assert.deepEqual(logSyncPlan(["a"], 1, 1), { kind: "none", lines: [] });
+  assert.deepEqual(logSyncPlan(["a"], 0, 3), { kind: "none", lines: [] });
+
+  // Under the cap: append exactly the missed lines, oldest-first.
+  const ring = ["l0", "l1", "l2", "l3"];
+  assert.deepEqual(logSyncPlan(ring, 4, 2), {
+    kind: "append",
+    lines: ["l2", "l3"],
+  });
+
+  // AT THE CAP (the freeze regression): the length is pinned, yet a
+  // missed line must still be appended — the seq, not the length, is
+  // the signal.
+  let logs = [];
+  let seq = 0;
+  for (let i = 0; i < LOG_SCROLLBACK; i++) {
+    logs = appendLog(logs, `x${i}`);
+    seq += 1;
+  }
+  // One more line past the cap: ring drops x0, keeps x1..x1000.
+  logs = appendLog(logs, "x1000");
+  seq += 1;
+  assert.equal(logs.length, LOG_SCROLLBACK); // flat, as in production
+  const plan = logSyncPlan(logs, seq, seq - 1);
+  assert.equal(plan.kind, "append");
+  assert.deepEqual(plan.lines, ["x1000"]);
+
+  // More than a ringful missed between renders (backgrounded tab): the
+  // delta is meaningless — rebuild from the ring as-is.
+  assert.deepEqual(logSyncPlan(logs, seq + LOG_SCROLLBACK + 1, seq), {
+    kind: "rebuild",
+    lines: logs.slice(),
+  });
+});
+
+test("seenText / seenStamp / formatAge: the last-seen lines (fake clock)", () => {
+  // seenText: cadence-driven cards (R5 dim + timestamp).
+  assert.equal(seenText(null, 9999, STALE_MS.battery), "never seen");
+  assert.equal(seenText(10_000, 10_500, STALE_MS.battery), "live · last seen 0.5s ago");
+  assert.equal(seenText(10_000, 15_000, STALE_MS.battery), "stale · last seen 5.0s ago");
+  assert.equal(seenText(10_000, 10_999, STALE_MS.imu), "stale · last seen 1.0s ago");
+
+  // seenStamp: snapshot cards (hub identity) — a plain stamp, no
+  // stale/live flip (hub_info is once-per-connect).
+  assert.equal(seenStamp(null, 1000), "never seen");
+  assert.equal(seenStamp(10_000, 12_500), "last seen 2.5s ago");
+
+  // formatAge bands: sub-10s tenths, then whole seconds/minutes/hours;
+  // negative deltas clamp (clock skew never shows "in the future").
+  assert.equal(formatAge(0), "0.0s ago");
+  assert.equal(formatAge(9_999), "10.0s ago");
+  assert.equal(formatAge(10_000), "10s ago");
+  assert.equal(formatAge(59_999), "59s ago"); // floors, never rounds up
+  assert.equal(formatAge(60_000), "1m ago");
+  assert.equal(formatAge(3_600_000), "1h ago");
 });
 
 test("reconnect backoff: 500 ms base, doubling, capped at 15 s", () => {

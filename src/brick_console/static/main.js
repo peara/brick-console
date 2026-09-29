@@ -13,16 +13,20 @@
 import {
   applyEnvelope,
   chipView,
+  formatAge,
   initialDashboard,
   isDimmed,
   isMockMode,
+  logSyncPlan,
   nextReconnectDelay,
-  staleness,
+  seenStamp,
+  seenText,
   STALE_MS,
   wsUrl,
 } from "./dashboard.mjs";
 
 const staleSweepMs = 250; // half the shortest stale timeout (500 ms)
+const followThresholdPx = 24; // "user is at the bottom" band for log follow
 
 const chipEl = document.getElementById("chip");
 const reasonEl = document.getElementById("reason");
@@ -30,6 +34,7 @@ const dimEl = document.getElementById("dashboard");
 const hubNameEl = document.getElementById("hub-name");
 const hubFwEl = document.getElementById("hub-firmware");
 const hubModelEl = document.getElementById("hub-model");
+const hubSeenEl = document.getElementById("hub-seen");
 const batteryCardEl = document.getElementById("battery-card");
 const batteryPctEl = document.getElementById("battery-pct");
 const batteryMvEl = document.getElementById("battery-mv");
@@ -54,52 +59,43 @@ for (const letter of PORT_LETTERS) {
   card.className = "port-card";
   card.innerHTML = `
     <header><span class="port-letter">${letter}</span><span class="port-device"></span></header>
-    <ul class="port-values"></ul>`;
+    <ul class="port-values"></ul>
+    <p class="seen port-seen"></p>`;
   portsEl.appendChild(card);
   portEls.set(letter, {
     card,
     device: card.querySelector(".port-device"),
     values: card.querySelector(".port-values"),
+    seen: card.querySelector(".port-seen"),
   });
 }
 
 let dash = initialDashboard();
-let logRendered = 0; // <li> nodes currently in the pane (render delta)
+let renderedLogSeq = 0; // log envelopes already in the DOM (syncs via logSeq)
 let socket = null;
 let reconnectAttempt = 0;
 let reconnectTimer = null;
 
 const now = () => Date.now();
 
-// -- Rendering --------------------------------------------------------------
-//
-// Each render is a full state pass: six ports and a handful of scalars —
-// innerHTML for the value rows, textContent for the scalars, no keyed
-// diffing needed at this size.
-
 function render() {
-  const t = now();
-
   const chip = chipView(dash);
   chipEl.textContent = chip.label;
   chipEl.dataset.tone = chip.tone;
   reasonEl.textContent = dash.external
     ? `external client took the hub — the server backs off and rescans · ${dash.reason}`
     : dash.reason;
-
-  // Dimming: OFFLINE (incl. EXTERNAL overlay) grays the cards out with
-  // "last seen" timestamps (the state envelope drives all cards).
   dimEl.classList.toggle("dimmed", isDimmed(dash));
-
-  paneStale();
+  renderPanes();
 }
 
-function paneStale() {
+function renderPanes() {
   const t = now();
 
   hubNameEl.textContent = dash.hub.name ?? "—";
   hubFwEl.textContent = dash.hub.firmware ?? "—";
   hubModelEl.textContent = dash.hub.model ?? "—";
+  hubSeenEl.textContent = seenStamp(dash.hub.at, t);
 
   const batteryStale = staleness(dash.battery.at, t, STALE_MS.battery);
   batteryPctEl.textContent =
@@ -108,11 +104,9 @@ function paneStale() {
     dash.battery.voltageMv === null ? "—" : `${dash.battery.voltageMv} mV`;
   batteryMaEl.textContent =
     dash.battery.currentMa === null ? "—" : `${dash.battery.currentMa} mA`;
-  batterySeenEl.textContent = seenText(dash.battery.at, batteryStale, t);
+  batterySeenEl.textContent = seenText(dash.battery.at, t, STALE_MS.battery);
   batteryCardEl.classList.toggle("stale", batteryStale.stale);
 
-  // IMU widget — accel/gyro numbers + the `up` side-string badge (M1's
-  // minimal orientation cue; no 3D).
   const imuStale = staleness(dash.imu.at, t, STALE_MS.imu);
   imuAccelEl.textContent =
     dash.imu.ax === null
@@ -123,7 +117,7 @@ function paneStale() {
       ? "—"
       : `${dash.imu.gx} / ${dash.imu.gy} / ${dash.imu.gz} °/s`;
   imuUpEl.textContent = dash.imu.up ?? "—";
-  imuSeenEl.textContent = seenText(dash.imu.at, imuStale, t);
+  imuSeenEl.textContent = seenText(dash.imu.at, t, STALE_MS.imu);
   imuCardEl.classList.toggle("stale", imuStale.stale);
 
   for (const letter of PORT_LETTERS) {
@@ -141,38 +135,31 @@ function paneStale() {
 }
 
 function renderPort(letter, t) {
-  const { card, device, values } = portEls.get(letter);
+  const { card, device, values, seen } = portEls.get(letter);
   const port = dash.ports[letter] ?? { device: null, rows: [], at: null };
   const portStale = staleness(port.at, t, STALE_MS.port);
 
   if (port.device === null) {
-    // No port envelope ever seen: render the dimmed empty port.
     card.classList.add("empty");
     card.classList.remove("stale");
     device.textContent = "";
     values.innerHTML = "";
+    seen.textContent = "";
     return;
   }
   card.classList.toggle("empty", port.device === "none");
   card.classList.toggle("stale", portStale.stale);
   device.textContent = port.device;
+  seen.textContent = port.device === "none" ? "" : seenText(port.at, t, STALE_MS.port);
   values.innerHTML = port.rows
     .map((row) => `<li><span class="k">${escapeHtml(row.key)}</span> ${escapeHtml(row.text)}</li>`)
     .join("");
 }
 
-function seenText(at, stale, t) {
-  if (at === null) return "never seen";
-  return `${stale.stale ? "stale" : "live"} · last seen ${formatAge(t - at)}`;
-}
-
-function formatAge(ms) {
-  const s = Math.max(0, ms) / 1000;
-  if (s < 10) return `${s.toFixed(1)}s ago`;
-  if (s < 60) return `${Math.floor(s)}s ago`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  return `${Math.floor(m / 60)}h ago`;
+function staleness(at, t, timeoutMs) {
+  if (at === null) return { stale: true, ageMs: null };
+  const ageMs = Math.max(0, t - at);
+  return { stale: ageMs >= timeoutMs, ageMs };
 }
 
 function escapeHtml(text) {
@@ -183,39 +170,49 @@ function escapeHtml(text) {
 }
 
 function renderLog() {
-  const lines = dash.logs;
-  if (lines.length < logRendered) {
-    rebuildLog(lines);
-    return;
-  }
-  for (let i = logRendered; i < lines.length; i++) {
-    const li = document.createElement("li");
-    li.textContent = lines[i];
-    logListEl.appendChild(li);
-  }
-  logRendered = lines.length;
-  logPaneEl.scrollTop = logPaneEl.scrollHeight;
-}
+  const plan = logSyncPlan(dash.logs, dash.logSeq, renderedLogSeq);
+  if (plan.kind === "none") return;
 
-function rebuildLog(lines) {
-  logListEl.replaceChildren(
-    ...lines.map((line) => {
+  // Follow only when the user is at (or near) the bottom, so reading the
+  // scrollback isn't yanked away by the next line (the pane keeps the
+  // newest LOG_SCROLLBACK lines; scrolling up pins the view).
+  const follow =
+    logPaneEl.scrollHeight - logPaneEl.scrollTop - logPaneEl.clientHeight <
+    followThresholdPx;
+
+  if (plan.kind === "rebuild") {
+    logListEl.replaceChildren(
+      ...plan.lines.map((line) => {
+        const li = document.createElement("li");
+        li.textContent = line;
+        return li;
+      }),
+    );
+  } else {
+    for (const line of plan.lines) {
       const li = document.createElement("li");
       li.textContent = line;
-      return li;
-    }),
-  );
-  logRendered = lines.length;
-  logPaneEl.scrollTop = logPaneEl.scrollHeight;
+      logListEl.appendChild(li);
+    }
+    // The ring may have dropped older lines from its front: trim the DOM
+    // in step so the pane mirrors the ring exactly (newest N lines).
+    while (logListEl.childElementCount > dash.logs.length) {
+      logListEl.firstElementChild.remove();
+    }
+  }
+  renderedLogSeq = dash.logSeq;
+  if (follow) logPaneEl.scrollTop = logPaneEl.scrollHeight;
 }
 
 // -- WebSocket ---------------------------------------------------------------
 
 function connect() {
   clearTimeout(reconnectTimer);
-  socket = new WebSocket(wsUrl(location, isMockMode(location.search)));
+  const sock = new WebSocket(wsUrl(location, isMockMode(location.search)));
+  socket = sock;
 
-  socket.onmessage = (event) => {
+  sock.onmessage = (event) => {
+    if (sock !== socket) return; // superseded mid-flight: ignore
     let envelope;
     try {
       envelope = JSON.parse(event.data);
@@ -226,18 +223,20 @@ function connect() {
     render();
   };
 
-  socket.onopen = () => {
+  sock.onopen = () => {
+    if (sock !== socket) return;
     reconnectAttempt = 0;
     render();
   };
 
-  socket.onclose = () => {
+  sock.onclose = () => {
+    if (sock !== socket) return; // a stale socket's close must not double-schedule
     const delay = nextReconnectDelay(reconnectAttempt);
     reconnectAttempt += 1;
     reconnectTimer = setTimeout(connect, delay);
   };
 
-  socket.onerror = () => socket.close();
+  sock.onerror = () => sock.close();
 }
 
 // -- Boot --------------------------------------------------------------------

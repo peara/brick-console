@@ -125,6 +125,10 @@ export function nextReconnectDelay(attempt, { baseMs, maxMs } = RECONNECT) {
 // tags the server's decoder enforces; a wrong-typed field is dropped, not
 // rendered as "undefined"). The BOOST-era unit trap: ColorDistanceSensor
 // `d` is PERCENT, not mm (D7); Motor `load` is mNm, not a percentage.
+// SYNC NOTE: this mirrors `brick_console.events::_PORT_SPECS` and the D7
+// field dictionary — three copies of one contract. Any field change must
+// land in all three (D7's evolution note: extract to docs/specs/ on the
+// first change). The unit traps are pinned by tests on both sides.
 const T_NUMBER = "number";
 const T_BOOLEAN = "boolean";
 const T_STRING = "string";
@@ -189,6 +193,21 @@ export function appendLog(logs, line, cap = LOG_SCROLLBACK) {
   return next.length > cap ? next.slice(next.length - cap) : next;
 }
 
+// The DOM-sync plan for the log pane: what the glue must do to bring the
+// `<li>` list level with the ring. `logSeq` counts every log envelope ever
+// applied; `renderedSeq` counts the ones already in the DOM. A length
+// delta cannot signal new lines at the ring's cap (the length never
+// grows past `cap`), so the sequence counter is what keeps the pane live
+// past LOG_SCROLLBACK — `append` carries the newest `missed` lines, and
+// a `missed` larger than the whole ring (more than a ringful between
+// renders) forces a rebuild.
+export function logSyncPlan(logs, logSeq, renderedSeq) {
+  const missed = logSeq - renderedSeq;
+  if (missed <= 0) return { kind: "none", lines: [] };
+  if (missed > logs.length) return { kind: "rebuild", lines: logs.slice() };
+  return { kind: "append", lines: logs.slice(logs.length - missed) };
+}
+
 // ---------------------------------------------------------------------------
 // Dashboard state — envelope application (pure: returns a new state)
 // ---------------------------------------------------------------------------
@@ -211,6 +230,7 @@ export function initialDashboard() {
     },
     ports, // letter → {device, rows, at}
     logs: [], // bounded raw-line ring (client-side scrollback)
+    logSeq: 0, // total log envelopes applied (at cap the length stays flat — the seq is the live signal)
     unknown: { count: 0, last: null }, // unknown telemetry kinds (ignored, counted)
   };
 }
@@ -365,7 +385,11 @@ function applyTelemetry(dash, data, nowMs) {
 
 function applyLog(dash, data) {
   if (typeof data.line !== "string") return dash;
-  return { ...dash, logs: appendLog(dash.logs, data.line) };
+  return {
+    ...dash,
+    logs: appendLog(dash.logs, data.line),
+    logSeq: dash.logSeq + 1,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -408,4 +432,33 @@ export function staleness(at, nowMs, timeoutMs) {
   if (at === null) return { stale: true, ageMs: null };
   const ageMs = Math.max(0, nowMs - at);
   return { stale: ageMs >= timeoutMs, ageMs };
+}
+
+// ---------------------------------------------------------------------------
+// Last-seen formatting (R5: dimmed + timestamp) — pure, shared by every card
+// ---------------------------------------------------------------------------
+
+export function formatAge(ms) {
+  const s = Math.max(0, ms) / 1000;
+  if (s < 10) return `${s.toFixed(1)}s ago`;
+  if (s < 60) return `${Math.floor(s)}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  return `${Math.floor(m / 60)}h ago`;
+}
+
+// A cadence-driven card's seen line (battery/IMU/ports): live or stale,
+// with the age since the newest envelope of that kind.
+export function seenText(at, nowMs, timeoutMs) {
+  if (at === null) return "never seen";
+  const { stale, ageMs } = staleness(at, nowMs, timeoutMs);
+  return `${stale ? "stale" : "live"} · last seen ${formatAge(ageMs)}`;
+}
+
+// A snapshot card's seen line (hub identity): no staleness flip — the
+// hub_info snapshot is once-per-connect, so the line reads as a plain
+// "last seen" stamp.
+export function seenStamp(at, nowMs) {
+  if (at === null) return "never seen";
+  return `last seen ${formatAge(nowMs - at)}`;
 }

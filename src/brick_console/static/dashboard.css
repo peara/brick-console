@@ -262,6 +262,11 @@ body {
   min-height: 1.2em;
 }
 
+.port-seen {
+  margin: 0.3rem 0 0;
+  font-size: 0.68rem;
+}
+
 @media (max-width: 560px) {
   .ports {
     grid-template-columns: repeat(2, 1fr);
