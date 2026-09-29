@@ -730,6 +730,35 @@ async def test_hub_info_snapshot_cached_and_telemetry_fanout(
         await cancel_quietly(task)
 
 
+async def test_subscribe_raw_fanout_includes_malformed_lines(
+    transport: FakeTransport, sink: FakeSink, fake_time: FakeTime
+) -> None:
+    # The WS gateway's live log seam (D7 raw-log-primary): every raw line
+    # fans out — malformed ones included, parsed events' lines too; the
+    # store's raw ring is fed in parallel; unsubscribe is idempotent.
+    transport.discover_results = [FakeHub()]
+    manager = make_manager(transport, sink, fake_time)
+    seen: list[bytes] = []
+    unsubscribe = manager.subscribe_raw(seen.append)
+    task = asyncio.create_task(manager.run())
+    try:
+        await run_until(manager, state=HubState.AGENT)
+        transport.push_stdout(BAT_LINE + b"not json\r\n")
+        await asyncio.sleep(0)
+        assert seen == [
+            b'{"t":"battery","v":8085,"c":42,"pct":87}',
+            b"not json",
+        ]
+        assert sink.raw_lines == seen  # store fed in parallel
+        unsubscribe()
+        unsubscribe()  # idempotent — a second call never raises
+        transport.push_stdout(b"more\r\n")
+        await asyncio.sleep(0)
+        assert len(seen) == 2  # no more lines after unsubscribe
+    finally:
+        await cancel_quietly(task)
+
+
 # ---------------------------------------------------------------------------
 # Fresh parser per connect (D7): per-connection state does not leak
 # ---------------------------------------------------------------------------

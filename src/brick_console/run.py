@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Callable
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 
@@ -87,6 +88,15 @@ class StubManager:
     once the agent program (``agent/``) lands — same injected seam, zero
     app changes (the run command constructs it here and passes it to
     :func:`~brick_console.app.create_app`).
+
+    Subscription no-ops: the WS gateway subscribes to the state,
+    telemetry, and raw-line fan-outs; a manager that lacks them would
+    crash the gateway. The stub therefore accepts every subscription
+    and simply never fires it — an offline stub has no state changes
+    (state is pinned to ``offline``) and produces no telemetry or stdout.
+    The gateway still serves the store (empty until the real manager
+    lands) and the join sequence, so the dashboard works end-to-end the
+    day this stub is swapped out.
     """
 
     def __init__(self) -> None:
@@ -100,6 +110,18 @@ class StubManager:
     def state_reason(self) -> str:
         return "manager not wired yet (stub)"
 
+    def subscribe_state(self, listener: object) -> Callable[[], None]:
+        """Accept and never fire — see the class docstring."""
+        return _noop_unsubscribe
+
+    def subscribe_telemetry(self, listener: object) -> Callable[[], None]:
+        """Accept and never fire — see the class docstring."""
+        return _noop_unsubscribe
+
+    def subscribe_raw(self, listener: object) -> Callable[[], None]:
+        """Accept and never fire — see the class docstring."""
+        return _noop_unsubscribe
+
     async def run(self) -> None:
         # Per-invocation park latch: an asyncio.Event created outside the
         # loop binds to the first loop that awaits it, so a second lifespan
@@ -109,6 +131,10 @@ class StubManager:
         # to the current loop every time.
         self.started += 1
         await asyncio.Event().wait()
+
+
+def _noop_unsubscribe() -> None:
+    """Idempotent no-op the stub subscriptions return."""
 
 
 def bind_config(env: dict[str, str] | None = None) -> tuple[str, int]:

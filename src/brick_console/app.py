@@ -59,6 +59,7 @@ from typing import Protocol
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from brick_console import ws
 from brick_console.store import TelemetryStore
 
 __all__ = [
@@ -186,6 +187,10 @@ def create_app(
             now=app.state.monotonic(),
             version=app.state.version,
         )
+
+    # The WS gateway must register before the "/" mount: routes win over
+    # files (the mount is fallback — see the module docstring).
+    ws.register_routes(app)
 
     # Fallback mount last: routes registered above win over files; the
     # dashboard lands as plain files under static_dir. check_dir=True: a
