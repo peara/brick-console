@@ -168,6 +168,24 @@ class Transport(ABC):
         """
 
     @abstractmethod
+    async def probe(self) -> None:
+        """Benign liveness check on the connected hub; resolves while the
+        link is up, raises while it is gone.
+
+        Exists because an external central taking the hub (F6) kills the
+        link in a way this stack's disconnect callback never reports:
+        hardware observation (2026-09-29, issue #24 evidence) showed
+        BlueZ removes the hub's GATT objects with no ``Connected: false``
+        property change, so ``on_disconnect`` never fires and a parked
+        manager would wait forever. A periodic read distinguishes the
+        paths — power-off fires the callback (a final
+        ``BLE_HOST_CONNECTED=False`` farewell arrives first), takeover
+        does not; probe failure plus callback silence within a grace
+        window is the takeover signature. Must be side-effect free (no
+        program writes, no slot traffic — a plain characteristic read).
+        """
+
+    @abstractmethod
     async def write_stdin(self, data: bytes) -> None:
         """Send ``data`` to the running program's stdin.
 

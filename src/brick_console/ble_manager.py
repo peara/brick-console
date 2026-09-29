@@ -99,6 +99,15 @@ logger = logging.getLogger(__name__)
 _DEFAULT_AGENT_PROGRAM = Path(__file__).resolve().parents[2] / "agent" / "agent_main.py"
 _TRANSITION_HISTORY = 100
 
+EXTERNAL_TAKEOVER_REASON = "external client took the hub"
+"""Canonical reason on the F6 takeover path (kicked by a second BLE
+central). The dashboard's token list already matches this wording — the
+overlay lights up with zero client changes. Pinned by unit test; the
+WS gateway forwards ``state_reason`` verbatim, so this string is wire
+contract (issue #24 evidence: the kick produces NO disconnect callback,
+so it can only ever be reported by the probe watchdog, never by a
+disconnect event)."""
+
 
 class HubState(StrEnum):
     """Server-tracked hub states (architecture §4 — the canonical table)."""
@@ -161,6 +170,14 @@ class BLEManagerConfig:
     """Second retry delay; doubles per attempt up to the ceiling."""
     backoff_ceiling: float = 10.0
     """Rescan ceiling (F6) — never fight for the single BLE central role."""
+    probe_interval: float = 5.0
+    """Liveness-probe cadence while parked in a live session. A
+    second-central takeover kills the link with NO disconnect callback
+    (2026-09-29 #24 evidence), so only the probe wakes the manager."""
+    probe_grace: float = 2.0
+    """Window after a failed probe for the disconnect callback to still
+    arrive. Callback within it → ordinary ``hub disconnected`` (power-off
+    shape); silence → the takeover reason (kick shape)."""
 
 
 class _Backoff:
@@ -428,8 +445,56 @@ class BLEManager:
         self._settling = False
         self._set_state(HubState.AGENT, "agent installed and started")
         self._backoff.reset()
-        await conn.disconnect.wait()
-        await self._end_session("hub disconnected")
+        reason = await self._park_until_drop(conn)
+        await self._end_session(reason)
+
+    async def _park_until_drop(self, conn: _Connection) -> str:
+        """Park in a live session until the connection drops; the session's
+        end reason (``hub disconnected`` or ``EXTERNAL_TAKEOVER_REASON``).
+
+        A bare drop wait is not enough: a second-central takeover kills the
+        link with NO disconnect callback (BlueZ removes the hub's objects
+        without a ``Connected: false`` property change — #24 hardware
+        evidence, 2026-09-29), so the loop would park forever. The drop
+        wait is therefore bounded by ``probe_interval``; on each timeout a
+        liveness probe runs and its failure is adjudicated by
+        :meth:`_single_probe`.
+
+        Waits use real ``asyncio`` timing, not the injected clock — the
+        manager's injected sleep exists for backoff-schedule tests, which
+        pin it (e.g. ``sleeps == [0.0, 0.0]``); probe parking is a
+        real-clock concern and must not distort that record.
+        """
+        while not conn.disconnect.is_set():
+            try:
+                await asyncio.wait_for(
+                    conn.disconnect.wait(), timeout=self._config.probe_interval
+                )
+            except TimeoutError:
+                takeover = await self._single_probe(conn)
+                if takeover is not None:
+                    return takeover
+        return "hub disconnected"
+
+    async def _single_probe(self, conn: _Connection) -> str | None:
+        """One liveness probe: resolves ``None`` while the link is fine.
+        On failure, wait out ``probe_grace`` for the disconnect callback —
+        power-off fires it (a final ``BLE_HOST_CONNECTED=False`` farewell
+        arrives first); silence past the window is the takeover signature
+        and resolves the takeover reason.
+        """
+        try:
+            await self._transport.probe()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — any failure IS the signal
+            logger.warning("liveness probe failed: %s: %s", type(exc).__name__, exc)
+            await asyncio.sleep(self._config.probe_grace)
+            if conn.disconnect.is_set():
+                return None
+            logger.warning("probe failed with no disconnect callback; takeover")
+            return EXTERNAL_TAKEOVER_REASON
+        return None
 
     async def _end_session(self, reason: str) -> None:
         """Drop the session and land in OFFLINE (§4: every disconnect →

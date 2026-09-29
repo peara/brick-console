@@ -4,10 +4,13 @@ Every hub operation the server supports must appear as an abstract method
 here — this test fails when someone adds a capability to the seam without
 going through the interface, or removes one silently.
 
-The surface has 8 operations since the docs-review pass (m1-docs-review.md
-finding 1): `subscribe_status` was added because program end is only
-observable through hub status events (`USER_PROGRAM_RUNNING` flag edges),
-not through stdout — a silent program exit would otherwise be undetectable.
+The surface has 9 operations: `subscribe_status` was added because
+program end is only observable through hub status events
+(`USER_PROGRAM_RUNNING` flag edges), not stdout — a silent program exit
+would otherwise be undetectable (m1-docs-review.md finding 1); `probe`
+was added because a second-central takeover produces no disconnect
+callback at all on this stack — a parked manager would otherwise wait
+forever (#24 hardware evidence, 2026-09-29).
 """
 
 import inspect
@@ -27,6 +30,7 @@ EXPECTED_METHODS = {
     "connect",
     "install_and_start",
     "stop",
+    "probe",
     "write_stdin",
     "subscribe_stdout",
     "subscribe_status",

@@ -23,10 +23,10 @@ import logging
 from pathlib import Path
 
 import pytest
-from bleak.exc import BleakGATTProtocolError
+from bleak.exc import BleakDBusError, BleakGATTProtocolError
 from pybricksdev.ble.pybricks import StatusFlag
 from pybricksdev.connections import ConnectionState
-from pybricksdev.connections.pybricks import HubDisconnectError
+from pybricksdev.connections.pybricks import FW_REV_UUID, HubDisconnectError
 from reactivex.subject import BehaviorSubject, Subject
 
 import brick_console.adapter as adapter_module
@@ -87,6 +87,7 @@ class FakePybricksHubBLE:
         self.run_error: Exception | None = None
         self.stop_error: Exception | None = None
         self.write_error: Exception | None = None
+        self.read_error: Exception | None = None
         self.print_output_at_connect: bool | None = None
         self._running_program = 0
         self._selected_slot = 0
@@ -143,6 +144,12 @@ class FakePybricksHubBLE:
         self.calls.append(CallRecord("write_string", {"value": value}))
         if self.write_error is not None:
             raise self.write_error
+
+    async def read_gatt_char(self, uuid: str) -> bytes:
+        self.calls.append(CallRecord("read_gatt_char", {"uuid": uuid}))
+        if self.read_error is not None:
+            raise self.read_error
+        return b"4.0.1"
 
     def drop_connection(self, *, power_button: bool = False) -> None:
         """Simulate a spontaneous drop — the bleak disconnected callback
@@ -379,6 +386,42 @@ async def test_write_stdin_decodes_and_delegates_chunking() -> None:
     await h.transport.write_stdin("print('héllo')\r\n".encode())
     writes = [c for c in h.hub.calls if c.name == "write_string"]
     assert [c.kwargs["value"] for c in writes] == ["print('héllo')\r\n"]
+
+
+async def test_probe_reads_firmware_characteristic() -> None:
+    # probe → one FW_REV_UUID read, the same characteristic the handshake
+    # already reads (the observation harness proved it benign at 2 Hz).
+    # The result is discarded: probe is a liveness signal, not data.
+    h = make_transport()
+    handle = DiscoveredPybricksHub(h.device)
+    await h.transport.connect(handle, on_disconnect=_DisconnectCounter())
+    await h.transport.probe()
+    reads = [c for c in h.hub.calls if c.name == "read_gatt_char"]
+    assert len(reads) == 1
+    assert reads[0].kwargs["uuid"] == FW_REV_UUID
+
+
+async def test_probe_failure_propagates_unwrapped() -> None:
+    # A dead-link probe raises the raw transport error, NOT a retyped
+    # ConnectionError — the takeover watchdog distinguishes takeover
+    # (BlueZ UnknownObject, objects removed) from other trouble by the
+    # original failure, so the adapter must not launder it (#24).
+    h = make_transport()
+    handle = DiscoveredPybricksHub(h.device)
+    await h.transport.connect(handle, on_disconnect=_DisconnectCounter())
+    gone = BleakDBusError(
+        "org.freedesktop.DBus.Error.UnknownObject",
+        "Method 'ReadValue' on interface 'org.bluez.GattCharacteristic1' doesn't exist",
+    )
+    h.hub.read_error = gone
+    with pytest.raises(BleakDBusError, match="UnknownObject"):
+        await h.transport.probe()
+
+
+async def test_probe_without_connection_raises_connection_error() -> None:
+    h = make_transport()
+    with pytest.raises(ConnectionError, match="probe with no connection"):
+        await h.transport.probe()
 
 
 async def test_subscribe_stdout_fans_out_raw_bytes() -> None:

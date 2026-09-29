@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from brick_console.ble_manager import (
+    EXTERNAL_TAKEOVER_REASON,
     BLEManager,
     BLEManagerConfig,
     HubState,
@@ -97,6 +98,11 @@ class FakeTransport(Transport):
         self.current_flags = StatusFlags(0)
         self.program_running_at_connect: bool = False
         self.stop_calls: int = 0
+        self.probe_calls: int = 0
+        self.probe_outcomes: list[bool] = []
+        """Scripted probe results, popped per call; empty list → healthy.
+        ``True`` raises like the real adapter's dead-link probe (the exact
+        exception type is the manager's business, not the seam's)."""
         self.now = 0.0  # fake time, advanced by sleep()
         self.park_stop = False
         """When set, ``stop()`` yields once before resolving — simulating a
@@ -156,6 +162,14 @@ class FakeTransport(Transport):
             # notifications can overtake it (the reinstall hijack window).
             await asyncio.sleep(0)
         self._emit_status(StatusFlags(0))
+
+    async def probe(self) -> None:
+        self.ops.append("probe()")
+        self.probe_calls += 1
+        if self.probe_outcomes and not self.probe_outcomes.pop(0):
+            raise ConnectionError(
+                "BleakDBusError: UnknownObject — GattCharacteristic1 doesn't exist"
+            )
 
     async def write_stdin(self, data: bytes) -> None:
         self.ops.append("write_stdin()")
@@ -789,10 +803,114 @@ async def test_fresh_parser_per_connect_malformed_count_resets(
 
 
 # ---------------------------------------------------------------------------
-# Session / transition logging (§4 rule 4)
+# Takeover detection (F6, #24 evidence): probe watchdog + reason token
 # ---------------------------------------------------------------------------
 
 
+async def test_takeover_probe_failure_without_callback_emits_token(
+    transport: FakeTransport, sink: FakeSink, fake_time: FakeTime
+) -> None:
+    """The kick shape: probe fails, no disconnect callback ever arrives.
+    The manager must leave AGENT via the canonical takeover reason — the
+    exact string the dashboard's token list matches (F6 overlay)."""
+    transport.discover_results = [FakeHub()]
+    manager = make_manager(
+        transport, sink, fake_time, probe_interval=0.01, probe_grace=0.01
+    )
+    task = asyncio.create_task(manager.run())
+    try:
+        await run_until(manager, state=HubState.AGENT)
+        transport.probe_outcomes = [False]
+        await run_until(manager, state=HubState.OFFLINE)
+        assert manager.state_reason == EXTERNAL_TAKEOVER_REASON
+        assert reasons(manager)[-1] == EXTERNAL_TAKEOVER_REASON
+        assert transport.probe_calls >= 1
+        assert "hub disconnected" not in reasons(manager)
+    finally:
+        await cancel_quietly(task)
+
+
+async def test_probe_failure_with_callback_within_grace_is_ordinary_disconnect(
+    transport: FakeTransport, sink: FakeSink, fake_time: FakeTime
+) -> None:
+    """The power-off shape: probe fails, the callback lands within the
+    grace window. Must land as an ordinary ``hub disconnected`` — never
+    mislabeled takeover (the callback's arrival proves the stack reported
+    the drop)."""
+    transport.discover_results = [FakeHub()]
+    manager = make_manager(
+        transport, sink, fake_time, probe_interval=0.01, probe_grace=0.05
+    )
+    task = asyncio.create_task(manager.run())
+    try:
+        await run_until(manager, state=HubState.AGENT)
+        transport.probe_outcomes = [False]
+        transport.fire_disconnect()
+        await run_until(manager, state=HubState.OFFLINE)
+        assert manager.state_reason == "hub disconnected"
+        assert EXTERNAL_TAKEOVER_REASON not in reasons(manager)
+    finally:
+        await cancel_quietly(task)
+
+
+async def test_callback_landing_mid_grace_is_ordinary_disconnect(
+    transport: FakeTransport, sink: FakeSink, fake_time: FakeTime
+) -> None:
+    """The sharpest race: the probe already failed (grace sleep in
+    flight) and the disconnect callback arrives *inside* the window —
+    the power-off report lagging one probe tick. The manager must land
+    ``hub disconnected``, never takeover: the callback's arrival is the
+    stack's own drop report and outranks the probe's inference."""
+    transport.discover_results = [FakeHub()]
+    manager = make_manager(
+        transport, sink, fake_time, probe_interval=0.01, probe_grace=0.05
+    )
+    task = asyncio.create_task(manager.run())
+    try:
+        await run_until(manager, state=HubState.AGENT)
+        transport.probe_outcomes = [False]  # first probe fails (~t=0.01)
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.02, transport.fire_disconnect)  # mid-grace (~t=0.03)
+        await run_until(manager, state=HubState.OFFLINE)
+        assert manager.state_reason == "hub disconnected"
+        assert EXTERNAL_TAKEOVER_REASON not in reasons(manager)
+    finally:
+        await cancel_quietly(task)
+
+
+async def test_park_without_probe_failures_never_emits_takeover(
+    transport: FakeTransport, sink: FakeSink, fake_time: FakeTime
+) -> None:
+    """Long healthy park: probes succeed forever, an ordinary disconnect
+    ends it — the watchdog never manufactures a takeover."""
+    transport.discover_results = [FakeHub()]
+    manager = make_manager(
+        transport, sink, fake_time, probe_interval=0.01, probe_grace=0.01
+    )
+    task = asyncio.create_task(manager.run())
+    try:
+        await run_until(manager, state=HubState.AGENT)
+        await asyncio.sleep(0.05)  # multiple probe ticks, all healthy
+        assert manager.state is HubState.AGENT
+        assert transport.probe_calls >= 2
+        transport.fire_disconnect()
+        await run_until(manager, state=HubState.OFFLINE)
+        assert reasons(manager)[-1] == "hub disconnected"
+    finally:
+        await cancel_quietly(task)
+
+
+def test_takeover_reason_token_is_wire_contract() -> None:
+    """The canonical token is pinned verbatim — the dashboard's
+    EXTERNAL_REASON_TOKENS list must match it by substring, and the WS
+    gateway forwards state_reason verbatim, so any drift breaks the F6
+    overlay silently. This test fails if either side drifts."""
+    assert EXTERNAL_TAKEOVER_REASON == "external client took the hub"
+
+
+# ---------------------------------------------------------------------------
+# Session / transition logging (§4 rule 4)
+# ---------------------------------------------------------------------------
 async def test_unexpected_error_never_kills_loop(
     sink: FakeSink, fake_time: FakeTime
 ) -> None:
