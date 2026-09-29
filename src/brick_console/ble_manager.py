@@ -99,6 +99,15 @@ logger = logging.getLogger(__name__)
 _DEFAULT_AGENT_PROGRAM = Path(__file__).resolve().parents[2] / "agent" / "agent_main.py"
 _TRANSITION_HISTORY = 100
 
+EXTERNAL_TAKEOVER_REASON = "external client took the hub"
+"""Canonical reason on the F6 takeover path (kicked by a second BLE
+central). The dashboard's token list already matches this wording — the
+overlay lights up with zero client changes. Pinned by unit test; the
+WS gateway forwards ``state_reason`` verbatim, so this string is wire
+contract (issue #24 evidence: the kick produces NO disconnect callback,
+so it can only ever be reported by the probe watchdog, never by a
+disconnect event)."""
+
 
 class HubState(StrEnum):
     """Server-tracked hub states (architecture §4 — the canonical table)."""
@@ -161,6 +170,17 @@ class BLEManagerConfig:
     """Second retry delay; doubles per attempt up to the ceiling."""
     backoff_ceiling: float = 10.0
     """Rescan ceiling (F6) — never fight for the single BLE central role."""
+    liveness_timeout: float = 5.0
+    """Park wait sliced into staleness checks. The hub's own status reports
+    (2 Hz push) are the liveness signal — no GATT reads (2026-09-30
+    counter-evidence: a program start swaps the hub's GATT table, so
+    cached-object reads fail with the kick's exact error shape while the
+    link is alive, mislabeling live sessions as takeovers; see D8)."""
+    liveness_grace: float = 2.0
+    """Window after status silence for the disconnect callback to still
+    arrive. Callback within it → ordinary ``hub disconnected`` (power-off
+    shape); silence → the takeover reason (kick shape: the 2026-09-29
+    evidence showed notifications stop AND no callback ever fires)."""
 
 
 class _Backoff:
@@ -197,10 +217,12 @@ class _Backoff:
 @dataclass
 class _Connection:
     """Per-connection state, dropped wholesale on disconnect (D7): the parser
-    (fresh per connect) and the disconnect latch the loop parks on."""
+    (fresh per connect), the disconnect latch the loop parks on, and the
+    last-status-report stamp the liveness watchdog rides (D8)."""
 
     parser: TelemetryParser
     disconnect: asyncio.Event
+    last_status_at: float
 
 
 def _safe_call(fn: Callable[..., None], /, *args: object) -> None:
@@ -392,6 +414,7 @@ class BLEManager:
         conn = _Connection(
             parser=TelemetryParser(clock=self._clock, on_malformed=self._log_malformed),
             disconnect=asyncio.Event(),
+            last_status_at=time.monotonic(),
         )
         self._expected_running = False
         self._program_running = False
@@ -428,8 +451,74 @@ class BLEManager:
         self._settling = False
         self._set_state(HubState.AGENT, "agent installed and started")
         self._backoff.reset()
-        await conn.disconnect.wait()
-        await self._end_session("hub disconnected")
+        reason = await self._park_until_drop(conn)
+        await self._end_session(reason)
+
+    async def _park_until_drop(self, conn: _Connection) -> str:
+        """Park in a live session until the connection drops; the session's
+        end reason (``hub disconnected`` or ``EXTERNAL_TAKEOVER_REASON``).
+
+        A bare drop wait is not enough: a second-central takeover kills the
+        link with NO disconnect callback (BlueZ removes the hub's objects
+        without a ``Connected: false`` property change — #24 hardware
+        evidence, 2026-09-29), so the loop would park forever. Liveness is
+        therefore read from the hub's own status reports (2 Hz push,
+        timestamped in ``conn.last_status_at`` by ``_on_status``): silence
+        past ``liveness_timeout`` opens the grace window, adjudicated by
+        :meth:`_adjudicate_silence`.
+
+        Waits, stamps, and the grace deadline all use real ``asyncio``
+        timing (``time.monotonic``), not the injected clock — the injected
+        sleep/clock exist for backoff-schedule tests, which pin them
+        (e.g. ``sleeps == [0.0, 0.0]``); liveness parking is a real-clock
+        concern and must never read a frozen fake clock as its deadline.
+        """
+        while not conn.disconnect.is_set():
+            try:
+                await asyncio.wait_for(
+                    conn.disconnect.wait(), timeout=self._config.liveness_timeout
+                )
+            except TimeoutError:
+                verdict = await self._adjudicate_silence(
+                    conn, silence_started_at=time.monotonic()
+                )
+                if verdict is not None:
+                    return verdict
+                if self._conn is not conn:
+                    return "hub disconnected"
+        return "hub disconnected"
+
+    async def _adjudicate_silence(
+        self, conn: _Connection, *, silence_started_at: float
+    ) -> str | None:
+        """Status reports went silent past ``liveness_timeout``; adjudicate
+        by what happens within ``liveness_grace`` of ``silence_started_at``.
+
+        Disconnect callback arriving → ``None`` (the park loop falls through
+        to the ordinary ``hub disconnected`` — power-off shape: farewell
+        ``BLE_HOST_CONNECTED=False`` report, then the callback). Fresh
+        reports resuming (``last_status_at`` past the silence start) →
+        ``None`` (transient silence; the park loop re-arms). Neither → the
+        takeover signature (kick shape: notifications stop mid-``True``
+        AND the callback never fires — #24 evidence) → takeover reason.
+
+        Session-scoped by identity like ``_disconnect_hook``: a session
+        ended by another path while this coroutine sleeps (e.g. an agent
+        reinstall forcing a reconnect) voids the verdict — a stale
+        adjudication must never label a newer session's link.
+        """
+        deadline = silence_started_at + self._config.liveness_grace
+        while True:
+            if conn.disconnect.is_set() or self._conn is not conn:
+                return None
+            if conn.last_status_at >= silence_started_at:
+                return None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(remaining, 0.5))
+        logger.warning("status reports silent with no disconnect callback; takeover")
+        return EXTERNAL_TAKEOVER_REASON
 
     async def _end_session(self, reason: str) -> None:
         """Drop the session and land in OFFLINE (§4: every disconnect →
@@ -546,7 +635,10 @@ class BLEManager:
                 _safe_call(listener, event)
 
     def _on_status(self, flags: StatusFlags) -> None:
-        """Derive program-lifecycle edges from status snapshots (§4 rule 2).
+        """Derive program-lifecycle edges from status snapshots (§4 rule 2)
+        and stamp the liveness heartbeat (D8: reports at 2 Hz ARE the
+        liveness signal — silence past ``liveness_timeout`` is what the
+        park watchdog adjudicates).
 
         During setup (``_settling``) snapshots only update the running flag —
         e.g. a stale program still running at connect is stopped by the
@@ -557,6 +649,7 @@ class BLEManager:
         if conn is None:
             logger.debug("status report with no connection; ignored")
             return
+        conn.last_status_at = time.monotonic()
         running = bool(flags & StatusFlags.USER_PROGRAM_RUNNING)
         if running == self._program_running:
             return  # snapshot, not an edge
