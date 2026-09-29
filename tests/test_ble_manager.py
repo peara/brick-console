@@ -98,11 +98,6 @@ class FakeTransport(Transport):
         self.current_flags = StatusFlags(0)
         self.program_running_at_connect: bool = False
         self.stop_calls: int = 0
-        self.probe_calls: int = 0
-        self.probe_outcomes: list[bool] = []
-        """Scripted probe results, popped per call; empty list → healthy.
-        ``True`` raises like the real adapter's dead-link probe (the exact
-        exception type is the manager's business, not the seam's)."""
         self.now = 0.0  # fake time, advanced by sleep()
         self.park_stop = False
         """When set, ``stop()`` yields once before resolving — simulating a
@@ -162,14 +157,6 @@ class FakeTransport(Transport):
             # notifications can overtake it (the reinstall hijack window).
             await asyncio.sleep(0)
         self._emit_status(StatusFlags(0))
-
-    async def probe(self) -> None:
-        self.ops.append("probe()")
-        self.probe_calls += 1
-        if self.probe_outcomes and not self.probe_outcomes.pop(0):
-            raise ConnectionError(
-                "BleakDBusError: UnknownObject — GattCharacteristic1 doesn't exist"
-            )
 
     async def write_stdin(self, data: bytes) -> None:
         self.ops.append("write_stdin()")
@@ -803,74 +790,50 @@ async def test_fresh_parser_per_connect_malformed_count_resets(
 
 
 # ---------------------------------------------------------------------------
-# Takeover detection (F6, #24 evidence): probe watchdog + reason token
+# Takeover detection (F6, #24 evidence): status-silence watchdog + token
 # ---------------------------------------------------------------------------
 
 
-async def test_takeover_probe_failure_without_callback_emits_token(
+async def test_takeover_status_silence_without_callback_emits_token(
     transport: FakeTransport, sink: FakeSink, fake_time: FakeTime
 ) -> None:
-    """The kick shape: probe fails, no disconnect callback ever arrives.
-    The manager must leave AGENT via the canonical takeover reason — the
-    exact string the dashboard's token list matches (F6 overlay)."""
+    """The kick shape: status reports stop and no disconnect callback ever
+    arrives (#24 evidence). The manager must leave AGENT via the canonical
+    takeover reason — the exact string the dashboard's token list matches
+    (F6 overlay)."""
     transport.discover_results = [FakeHub()]
     manager = make_manager(
-        transport, sink, fake_time, probe_interval=0.01, probe_grace=0.01
+        transport, sink, fake_time, liveness_timeout=0.05, liveness_grace=0.05
     )
     task = asyncio.create_task(manager.run())
     try:
         await run_until(manager, state=HubState.AGENT)
-        transport.probe_outcomes = [False]
+        # Reports go silent: no further _emit_status, real time flows past
+        # timeout + grace.
         await run_until(manager, state=HubState.OFFLINE)
         assert manager.state_reason == EXTERNAL_TAKEOVER_REASON
         assert reasons(manager)[-1] == EXTERNAL_TAKEOVER_REASON
-        assert transport.probe_calls >= 1
         assert "hub disconnected" not in reasons(manager)
     finally:
         await cancel_quietly(task)
 
 
-async def test_probe_failure_with_callback_within_grace_is_ordinary_disconnect(
+async def test_silence_with_callback_within_grace_is_ordinary_disconnect(
     transport: FakeTransport, sink: FakeSink, fake_time: FakeTime
 ) -> None:
-    """The power-off shape: probe fails, the callback lands within the
-    grace window. Must land as an ordinary ``hub disconnected`` — never
+    """The power-off shape: reports go silent, the callback lands within
+    the grace window. Must land as ordinary ``hub disconnected`` — never
     mislabeled takeover (the callback's arrival proves the stack reported
     the drop)."""
     transport.discover_results = [FakeHub()]
     manager = make_manager(
-        transport, sink, fake_time, probe_interval=0.01, probe_grace=0.05
+        transport, sink, fake_time, liveness_timeout=0.05, liveness_grace=0.25
     )
     task = asyncio.create_task(manager.run())
     try:
         await run_until(manager, state=HubState.AGENT)
-        transport.probe_outcomes = [False]
-        transport.fire_disconnect()
-        await run_until(manager, state=HubState.OFFLINE)
-        assert manager.state_reason == "hub disconnected"
-        assert EXTERNAL_TAKEOVER_REASON not in reasons(manager)
-    finally:
-        await cancel_quietly(task)
-
-
-async def test_callback_landing_mid_grace_is_ordinary_disconnect(
-    transport: FakeTransport, sink: FakeSink, fake_time: FakeTime
-) -> None:
-    """The sharpest race: the probe already failed (grace sleep in
-    flight) and the disconnect callback arrives *inside* the window —
-    the power-off report lagging one probe tick. The manager must land
-    ``hub disconnected``, never takeover: the callback's arrival is the
-    stack's own drop report and outranks the probe's inference."""
-    transport.discover_results = [FakeHub()]
-    manager = make_manager(
-        transport, sink, fake_time, probe_interval=0.01, probe_grace=0.05
-    )
-    task = asyncio.create_task(manager.run())
-    try:
-        await run_until(manager, state=HubState.AGENT)
-        transport.probe_outcomes = [False]  # first probe fails (~t=0.01)
         loop = asyncio.get_running_loop()
-        loop.call_later(0.02, transport.fire_disconnect)  # mid-grace (~t=0.03)
+        loop.call_later(0.10, transport.fire_disconnect)
         await run_until(manager, state=HubState.OFFLINE)
         assert manager.state_reason == "hub disconnected"
         assert EXTERNAL_TAKEOVER_REASON not in reasons(manager)
@@ -878,21 +841,31 @@ async def test_callback_landing_mid_grace_is_ordinary_disconnect(
         await cancel_quietly(task)
 
 
-async def test_park_without_probe_failures_never_emits_takeover(
+async def test_reports_resuming_after_silence_keep_session_alive(
     transport: FakeTransport, sink: FakeSink, fake_time: FakeTime
 ) -> None:
-    """Long healthy park: probes succeed forever, an ordinary disconnect
-    ends it — the watchdog never manufactures a takeover."""
+    """Transient report silence must NOT end the session: reports resume
+    inside the grace window and the park loop re-arms, repeatedly. This is
+    the false-positive bound — only silence sustained past grace with no
+    callback ever ends the session."""
     transport.discover_results = [FakeHub()]
     manager = make_manager(
-        transport, sink, fake_time, probe_interval=0.01, probe_grace=0.01
+        transport, sink, fake_time, liveness_timeout=0.05, liveness_grace=0.25
     )
     task = asyncio.create_task(manager.run())
     try:
         await run_until(manager, state=HubState.AGENT)
-        await asyncio.sleep(0.05)  # multiple probe ticks, all healthy
+
+        async def sparse_reports() -> None:
+            for _ in range(16):
+                await asyncio.sleep(0.06)
+                transport._emit_status(StatusFlags.USER_PROGRAM_RUNNING)
+
+        reporter = asyncio.create_task(sparse_reports())
+        await asyncio.sleep(1.0)
+        reporter.cancel()
         assert manager.state is HubState.AGENT
-        assert transport.probe_calls >= 2
+        assert EXTERNAL_TAKEOVER_REASON not in reasons(manager)
         transport.fire_disconnect()
         await run_until(manager, state=HubState.OFFLINE)
         assert reasons(manager)[-1] == "hub disconnected"
@@ -900,32 +873,58 @@ async def test_park_without_probe_failures_never_emits_takeover(
         await cancel_quietly(task)
 
 
-async def test_stale_probe_never_adjudicates_a_newer_session(
+async def test_stale_adjudication_never_labels_a_newer_session(
     transport: FakeTransport, sink: FakeSink, fake_time: FakeTime
 ) -> None:
-    """A probe from a dead session's park loop must not label the *next*
-    session's OFFLINE as takeover: the reinstall-forced-reconnect path can
-    end one session while its probe is still in the grace window. The
-    verdict is void unless ``self._conn`` is still the probed connection
-    (identity guard, same pattern as the disconnect hook)."""
+    """An adjudication sleeping in its grace window when the session ends
+    by another path (reinstall-forced reconnect) must not label the next
+    session's OFFLINE as takeover — the verdict is void unless the session
+    is still the adjudicated one (identity guard)."""
     transport.discover_results = [FakeHub(), FakeHub()]
     manager = make_manager(
-        transport, sink, fake_time, probe_interval=0.01, probe_grace=0.05
+        transport, sink, fake_time, liveness_timeout=0.05, liveness_grace=0.5
     )
     task = asyncio.create_task(manager.run())
     try:
         await run_until(manager, state=HubState.AGENT)
         first_conn = manager._conn
-        transport.probe_outcomes = [False]
-        # The session ends by another path *while the probe is in grace*:
-        # the reinstall failure forces a reconnect.
+        await asyncio.sleep(0.08)  # silence adjudication is mid-grace
         assert first_conn is not None
-        first_conn.disconnect.set()
+        first_conn.disconnect.set()  # session ends by another path
         await run_until(manager, state=HubState.OFFLINE)
         assert manager.state_reason == "hub disconnected"
         assert EXTERNAL_TAKEOVER_REASON not in reasons(manager)
         await run_until(manager, state=HubState.AGENT)
         assert manager._conn is not first_conn
+    finally:
+        await cancel_quietly(task)
+
+
+async def test_park_with_reports_flowing_never_emits_takeover(
+    transport: FakeTransport, sink: FakeSink, fake_time: FakeTime
+) -> None:
+    """Long healthy park: reports keep flowing, an ordinary disconnect
+    ends it — the watchdog never manufactures a takeover."""
+    transport.discover_results = [FakeHub()]
+    manager = make_manager(
+        transport, sink, fake_time, liveness_timeout=0.05, liveness_grace=0.05
+    )
+    task = asyncio.create_task(manager.run())
+    try:
+        await run_until(manager, state=HubState.AGENT)
+
+        async def healthy_reports() -> None:
+            while True:
+                await asyncio.sleep(0.02)
+                transport._emit_status(StatusFlags.USER_PROGRAM_RUNNING)
+
+        reporter = asyncio.create_task(healthy_reports())
+        await asyncio.sleep(0.3)
+        reporter.cancel()
+        assert manager.state is HubState.AGENT
+        transport.fire_disconnect()
+        await run_until(manager, state=HubState.OFFLINE)
+        assert reasons(manager)[-1] == "hub disconnected"
     finally:
         await cancel_quietly(task)
 

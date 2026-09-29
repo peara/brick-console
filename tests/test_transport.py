@@ -4,13 +4,14 @@ Every hub operation the server supports must appear as an abstract method
 here — this test fails when someone adds a capability to the seam without
 going through the interface, or removes one silently.
 
-The surface has 9 operations: `subscribe_status` was added because
+The surface has 8 operations: `subscribe_status` was added because
 program end is only observable through hub status events
 (`USER_PROGRAM_RUNNING` flag edges), not stdout — a silent program exit
-would otherwise be undetectable (m1-docs-review.md finding 1); `probe`
-was added because a second-central takeover produces no disconnect
-callback at all on this stack — a parked manager would otherwise wait
-forever (#24 hardware evidence, 2026-09-29).
+would otherwise be undetectable (m1-docs-review.md finding 1). Takeover
+liveness (D8) deliberately rides the SAME status reports — the 2026-09-30
+counter-evidence killed a draft `probe()` read op: program start swaps the
+hub's GATT table, so cached-object reads fail with the kick's exact error
+shape while the link is alive.
 """
 
 import inspect
@@ -30,7 +31,6 @@ EXPECTED_METHODS = {
     "connect",
     "install_and_start",
     "stop",
-    "probe",
     "write_stdin",
     "subscribe_stdout",
     "subscribe_status",

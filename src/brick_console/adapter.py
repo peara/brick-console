@@ -78,7 +78,6 @@ from pybricksdev.ble import find_device
 from pybricksdev.ble.pybricks import StatusFlag, UserProgramId
 from pybricksdev.connections import ConnectionState
 from pybricksdev.connections.pybricks import (
-    FW_REV_UUID,
     HubDisconnectError,
     HubPowerButtonPressedError,
     PybricksHubBLE,
@@ -205,12 +204,6 @@ class _HubProtocol(Protocol):
     async def stop_user_program(self) -> None: ...
 
     async def write_string(self, value: str) -> None: ...
-
-    async def read_gatt_char(self, uuid: str) -> bytes:
-        """One characteristic read — the probe's transport. Structurally
-        typed (the real ``PybricksHubBLE`` satisfies it); fakes implement
-        it to script probe outcomes."""
-        ...
 
 
 class _DisconnectBridge:
@@ -442,20 +435,6 @@ class PybricksDevTransport(Transport):
             await hub.stop_user_program()
         except _DISCONNECT_ERRORS as exc:
             raise ConnectionError(f"hub disconnected during stop: {exc}") from exc
-
-    async def probe(self) -> None:
-        """Liveness probe: one benign read of the firmware-revision
-        characteristic (``FW_REV_UUID``, already read during every
-        handshake — the same shape the #24 hardware observation used at
-        2 Hz for minutes with zero side effects). Raises when the link is
-        gone; the manager's takeover watchdog decides what the failure
-        means (see :meth:`Transport.probe`). Errors are NOT wrapped in
-        ``ConnectionError`` here — the watchdog needs the raw failure to
-        distinguish takeover (BlueZ ``UnknownObject``: objects removed, no
-        callback) from other transport trouble by evidence, not by type.
-        """
-        hub = self._require_hub("probe")
-        await hub.read_gatt_char(FW_REV_UUID)
 
     async def write_stdin(self, data: bytes) -> None:
         """Send stdin bytes; chunking is delegated to ``write_string``
