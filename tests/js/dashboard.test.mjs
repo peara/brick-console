@@ -26,6 +26,7 @@ import {
   LOG_SCROLLBACK,
   nextExternalOverlay,
   nextReconnectDelay,
+  PAINT_MS,
   portRows,
   seenStamp,
   seenText,
@@ -427,6 +428,17 @@ test("stale timeouts are 5× the D7 cadence", () => {
   assert.equal(STALE_MS.battery, 5000); // 5 × 1 Hz
   assert.equal(STALE_MS.imu, 500); // 5 × 10 Hz
   assert.equal(STALE_MS.port, 500); // 5 × 10 Hz
+});
+
+test("paint cadence: coalesced, human-readable, and stale-safe", () => {
+  // The paint tick decouples DOM work from envelope arrival (the join
+  // replay bursts the whole ring; steady mock is ~60 envelopes/s; a full
+  // hub would be higher). It must sit inside the readable band and at or
+  // under half the shortest stale timeout, so a stale flip lands within
+  // one cadence period of paint — never delayed past it.
+  assert.ok(PAINT_MS >= 100 && PAINT_MS <= 200, "paint band is 100–200 ms");
+  assert.ok(PAINT_MS * 2 <= STALE_MS.imu, "paint is at most half the shortest stale timeout");
+  assert.ok(PAINT_MS * 2 <= STALE_MS.port, "paint is at most half the shortest stale timeout");
 });
 
 // ---------------------------------------------------------------------------

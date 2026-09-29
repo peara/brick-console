@@ -44,6 +44,19 @@ export const RECONNECT = Object.freeze({ baseMs: 500, maxMs: 15000 });
 // attempt, capped at 15 s — mirrors the manager's bounded rescan posture
 // (architecture §4 rule 1: never fight, but always come back).
 
+export const PAINT_MS = 200;
+// DOM paint cadence — decoupled from envelope arrival. The view model
+// ingests every envelope the moment it lands (latest-wins, receipt-time
+// stamped); painting is coalesced to this tick, which also carries the
+// stale sweep (R5's dim + timestamp decisions are computed at paint time
+// from receipt stamps, so a slower paint never delays or falsifies
+// staleness — the values a paint shows are point-in-time snapshots, and
+// intermediate paints would only repeat the same arithmetic). 200 ms =
+// 5 paints/s: inside the human-readable band, at most half the shortest
+// stale timeout (STALE_MS.imu/port), and a hard ceiling on render cost —
+// the wire can burst (the join replay alone ships the whole ring), while
+// the DOM sees at most this many full passes per second.
+
 // ---------------------------------------------------------------------------
 // EXTERNAL overlay (F6) — a UI overlay on OFFLINE, derived client-side
 // ---------------------------------------------------------------------------

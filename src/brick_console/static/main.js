@@ -3,9 +3,12 @@
 // Thin by design: this module owns the DOM and the WebSocket, and nothing
 // else. Every value → view-model decision lives in dashboard.mjs (pure,
 // unit-tested under node --test); this file renders what that module
-// decides: apply the envelope → render the state. The stale sweep runs on
-// a 250 ms interval (half the shortest STALE_MS entry) so dimming engages
-// within one cadence period of a feed cut.
+// decides. Envelope arrival only updates the view model (latest-wins,
+// receipt-time stamped) — painting is coalesced to the PAINT_MS tick,
+// which also carries the stale sweep (R5): the wire can burst (the join
+// replay ships the whole ring at once; mock runs ~60 envelopes/s
+// steady), but the DOM sees at most PAINT_MS-paced full passes, so the
+// numbers stay readable and the page stays interactive.
 //
 // No framework, no bundler, no CDN (the LAN box may be offline) — plain
 // ES modules served by the static mount.
@@ -19,13 +22,13 @@ import {
   isMockMode,
   logSyncPlan,
   nextReconnectDelay,
+  PAINT_MS,
   seenStamp,
   seenText,
   STALE_MS,
   wsUrl,
 } from "./dashboard.mjs";
 
-const staleSweepMs = 250; // half the shortest stale timeout (500 ms)
 const followThresholdPx = 24; // "user is at the bottom" band for log follow
 
 const chipEl = document.getElementById("chip");
@@ -219,14 +222,13 @@ function connect() {
     } catch {
       return;
     }
+    // View model only — painting happens on the PAINT_MS tick.
     dash = applyEnvelope(dash, envelope, now());
-    render();
   };
 
   sock.onopen = () => {
     if (sock !== socket) return;
     reconnectAttempt = 0;
-    render();
   };
 
   sock.onclose = () => {
@@ -244,4 +246,8 @@ function connect() {
 render();
 connect();
 
-setInterval(render, staleSweepMs);
+// The paint clock: coalesces every envelope that arrived since the last
+// tick into one full pass, and carries the stale sweep (R5) — staleness
+// is recomputed from receipt stamps at paint time, so a paint shows each
+// value's latest snapshot plus its current live/stale verdict.
+setInterval(render, PAINT_MS);
