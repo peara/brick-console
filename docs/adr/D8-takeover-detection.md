@@ -19,9 +19,12 @@ the takeover path. Hardware observation (2026-09-29, harness
   within ~250 ms. The existing drop path works exactly as designed.
 - **Held-hub facts:** a held hub never advertises in normal mode (invisible
   to scanners); a second-central connect is refused (30 s BlueZ timeout)
-  without disturbing the holder. Takeover requires pairing mode — a
-  deliberate physical act (BT button) — and the incumbent is then kicked
-  (last-central-wins), silently.
+  without disturbing the holder. Takeover requires pairing mode — and the
+  BT button is a **no-op while a program runs** (observed 2026-09-30), so a
+  user taking the hub from the console must first stop the running agent
+  with a short power-button press, then press BT in the ~5 s reinstall
+  idle window: the genuine production takeover sequence. Within pairing
+  mode, last-central-wins kicks the incumbent silently.
 
 **Decision:** takeover is detected by *signature*, not by event:
 
