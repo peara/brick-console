@@ -2,11 +2,62 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>brick-console</title>
+    <link rel="stylesheet" href="/dashboard.css" />
+    <script type="module" src="/main.js" defer></script>
   </head>
   <body>
-    <!-- Placeholder: the M1 dashboard replaces this file. -->
-    <h1>brick-console</h1>
-    <p>Dashboard not built yet. <a href="/healthz">healthz</a></p>
+    <!-- Single-page read-only dashboard (R2): status chip, battery, port
+         map, IMU, hub identity, raw stdout pane — all live via /ws. The
+         editor pane, run/stop, library, and control are M2/M3. -->
+    <header class="topbar">
+      <h1>brick-console</h1>
+      <span id="chip" data-tone="offline" class="chip">…</span>
+    </header>
+    <p id="reason" class="reason" aria-live="polite"></p>
+
+    <main id="dashboard">
+      <section class="card" id="hub-card">
+        <h2>Hub</h2>
+        <dl class="kv">
+          <div><dt>name</dt><dd id="hub-name">—</dd></div>
+          <div><dt>firmware</dt><dd id="hub-firmware">—</dd></div>
+          <div><dt>model</dt><dd id="hub-model">—</dd></div>
+        </dl>
+      </section>
+
+      <section class="card" id="battery-card">
+        <h2>Battery</h2>
+        <div class="big" id="battery-pct">—</div>
+        <dl class="kv">
+          <div><dt>voltage</dt><dd id="battery-mv">—</dd></div>
+          <div><dt>current</dt><dd id="battery-ma">—</dd></div>
+        </dl>
+        <p class="seen" id="battery-seen">never seen</p>
+      </section>
+
+      <section class="card" id="imu-card">
+        <h2>IMU</h2>
+        <dl class="kv">
+          <div><dt>accel</dt><dd id="imu-accel">—</dd></div>
+          <div><dt>gyro</dt><dd id="imu-gyro">—</dd></div>
+          <div><dt>up</dt><dd><span class="badge" id="imu-up">—</span></dd></div>
+        </dl>
+        <p class="seen" id="imu-seen">never seen</p>
+      </section>
+
+      <section class="card" id="ports-card">
+        <h2>Ports</h2>
+        <div id="ports" class="ports"></div>
+      </section>
+
+      <section class="card" id="console-card">
+        <h2>Console</h2>
+        <p class="hint">raw hub stdout — last lines, live</p>
+        <pre id="log-pane" class="log-pane"><ol id="log-lines" class="log-lines"></ol></pre>
+        <p class="hint" id="unknown-kinds" aria-live="polite"></p>
+      </section>
+    </main>
   </body>
 </html>
