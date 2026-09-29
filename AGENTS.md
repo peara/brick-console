@@ -66,7 +66,8 @@ Full convention: [docs/testing.md](docs/testing.md) — strategies per target (s
 - `system.storage` on this hub: 512 bytes, cleared on firmware change. Nothing durable goes there.
 - Run-to-RAM (`pybricksdev run ble`) does not overwrite the 5 permanent slots.
 - A held hub does not advertise (normal mode): invisible to every scanner — "not advertising" means held OR off/asleep, not just off. Second-central connects are refused (BlueZ timeout) without disturbing the holder.
-- Takeover (second central takes the hub) requires pairing mode — a deliberate BT-button press — and last-central-wins kicks the incumbent **silently**: no disconnect callback ever fires (BlueZ removes the hub's objects without a `Connected: false` change), only in-flight GATT ops fail (`UnknownObject`). The manager's probe watchdog (D8) handles this; never assume `on_disconnect` will fire.
+- Takeover (second central takes the hub) requires pairing mode — a deliberate BT-button press — and last-central-wins kicks the incumbent **silently**: no disconnect callback ever fires (BlueZ removes the hub's objects without a `Connected: false` change), only in-flight GATT ops fail (`UnknownObject`). The manager's status-silence watchdog (D8) handles this; never assume `on_disconnect` will fire.
+- **Program start swaps the hub's GATT table**: cached characteristic objects die underneath a live link (reads fail with `UnknownObject` — the kick's exact error shape). Never use cached-object GATT reads as a liveness signal; the status-report push channel is the reliable one (D8 amendment). Also: never hard-kill the server mid-scan — BlueZ's discovery session wedges (`InProgress` on every later scan until the adapter is power-cycled).
 - BLE write chunk size is negotiated per connection (read from hub capabilities); pybricksdev handles this internally.
 - CoreInk e-ink client (M4): full refresh 0.82 s, partial 0.24 s, keep ≥15 s between refreshes.
 

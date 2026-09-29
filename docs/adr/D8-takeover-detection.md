@@ -1,6 +1,6 @@
-# D8 — Takeover detection: liveness probe + canonical reason token
+# D8 — Takeover detection: status-report-silence watchdog + canonical reason token
 
-**Status:** accepted (2026-09-29 — resolves the #24 evidence question, F6)
+**Status:** accepted (2026-09-29; amended 2026-09-30 — liveness signal reworked from GATT-read probes to status-report silence, see the amendment at the end)
 
 **Context:** F6 requires the dashboard to show EXTERNAL when another BLE
 central takes the hub. The M1 dashboard overlay (PR #23) derives it from the
@@ -26,13 +26,16 @@ the takeover path. Hardware observation (2026-09-29, harness
 **Decision:** takeover is detected by *signature*, not by event:
 
 1. The manager's park loop (`_park_until_drop`) bounds the drop-event wait
-   by `probe_interval` (default 5 s) and runs one benign liveness probe per
-   tick — a single `FW_REV_UUID` characteristic read (`Transport.probe()`,
-   the seam's 9th operation, D6 amended).
-2. A failed probe opens a `probe_grace` window (default 2 s) for the
-   disconnect callback to still arrive. Callback within it → ordinary
-   `hub disconnected` (power-off shape). Silence past it → the takeover
-   path.
+   by `liveness_timeout` (default 5 s). Liveness is read from the hub's own
+   status reports — the 2 Hz push channel the manager already subscribes
+   to (`Transport.subscribe_status`, D6): every report timestamps
+   `conn.last_status_at`, and silence past the timeout opens the grace
+   window.
+2. `liveness_grace` (default 2 s) adjudicates the silence: the disconnect
+   callback arriving within it → ordinary `hub disconnected` (power-off
+   shape — a final `BLE_HOST_CONNECTED=False` farewell arrives first).
+   Fresh reports resuming → transient silence, park re-arms. Neither → the
+   takeover path.
 3. The takeover path ends the session with the canonical reason token
    `EXTERNAL_TAKEOVER_REASON` = `"external client took the hub"` — the
    dashboard's existing `EXTERNAL_REASON_TOKENS` matches it by substring
@@ -65,3 +68,28 @@ powered-off hub, so rescan results cannot separate the two; only the probe
 signature can. *Reconnect-attempt probing* — attempting connects while
 another central holds the hub is fighting (F6 forbids) and gets refused
 without holder disturbance, yielding nothing.
+
+*Amended 2026-09-30:* the original decision used a benign GATT read
+(`FW_REV_UUID`) as the periodic probe. Live-check counter-evidence killed
+it: **a program start swaps the hub's GATT table**, so a read against a
+cached characteristic object fails with `UnknownObject` — the kick's exact
+error shape — while the link is fully alive (status reports and stdout
+still streaming; hub BT light solid). The watchdog therefore mislabeled a
+healthy AGENT session as takeover ~7 s in, tore the session down, the
+teardown itself failed (BlueZ objects already gone), and the hub kept
+holding the dead session: program running, never re-advertising — a wedge
+requiring a hub power cycle to clear. Two such wedges were observed
+(2026-09-29 23:51 and 2026-09-30 00:02) before the pattern was identified;
+the discriminating evidence was the dashboard log streaming heartbeat
+lines at the same moment the read-probe failed — the push channel was
+truthful exactly where the pull channel lied. Liveness now reads the
+status-report push channel itself (silence + no callback = the signature);
+`Transport.probe()` was removed again (the seam stays at 8 operations — a
+GATT-read liveness op is unsound on this firmware). The 2026-09-29 kick
+evidence still carries the decision: at the real kick, status notifications
+stopped mid-`True` and no callback ever fired; at power-off, the farewell
+report and callback arrived within ~250 ms; at transient silence, reports
+resume. A further implementation constraint surfaced by the rework's own
+tests: the liveness timing trio (stamp, silence start, grace deadline) must
+run on real `time.monotonic`, never an injected clock — a frozen fake clock
+as a deadline source wedges the adjudication loop.
