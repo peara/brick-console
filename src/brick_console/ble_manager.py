@@ -474,6 +474,8 @@ class BLEManager:
                 takeover = await self._single_probe(conn)
                 if takeover is not None:
                     return takeover
+                if self._conn is not conn:
+                    return "hub disconnected"
         return "hub disconnected"
 
     async def _single_probe(self, conn: _Connection) -> str | None:
@@ -482,15 +484,22 @@ class BLEManager:
         power-off fires it (a final ``BLE_HOST_CONNECTED=False`` farewell
         arrives first); silence past the window is the takeover signature
         and resolves the takeover reason.
+
+        Session-scoped by identity like ``_disconnect_hook``: if the
+        session ended by another path while a probe was in flight (e.g. an
+        agent reinstall forcing a reconnect), the verdict is void — a
+        stale probe must never adjudicate a newer session's link.
         """
         try:
-            await self._transport.probe()
+            await asyncio.wait_for(
+                self._transport.probe(), timeout=self._config.probe_interval
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — any failure IS the signal
             logger.warning("liveness probe failed: %s: %s", type(exc).__name__, exc)
             await asyncio.sleep(self._config.probe_grace)
-            if conn.disconnect.is_set():
+            if conn.disconnect.is_set() or self._conn is not conn:
                 return None
             logger.warning("probe failed with no disconnect callback; takeover")
             return EXTERNAL_TAKEOVER_REASON

@@ -900,6 +900,36 @@ async def test_park_without_probe_failures_never_emits_takeover(
         await cancel_quietly(task)
 
 
+async def test_stale_probe_never_adjudicates_a_newer_session(
+    transport: FakeTransport, sink: FakeSink, fake_time: FakeTime
+) -> None:
+    """A probe from a dead session's park loop must not label the *next*
+    session's OFFLINE as takeover: the reinstall-forced-reconnect path can
+    end one session while its probe is still in the grace window. The
+    verdict is void unless ``self._conn`` is still the probed connection
+    (identity guard, same pattern as the disconnect hook)."""
+    transport.discover_results = [FakeHub(), FakeHub()]
+    manager = make_manager(
+        transport, sink, fake_time, probe_interval=0.01, probe_grace=0.05
+    )
+    task = asyncio.create_task(manager.run())
+    try:
+        await run_until(manager, state=HubState.AGENT)
+        first_conn = manager._conn
+        transport.probe_outcomes = [False]
+        # The session ends by another path *while the probe is in grace*:
+        # the reinstall failure forces a reconnect.
+        assert first_conn is not None
+        first_conn.disconnect.set()
+        await run_until(manager, state=HubState.OFFLINE)
+        assert manager.state_reason == "hub disconnected"
+        assert EXTERNAL_TAKEOVER_REASON not in reasons(manager)
+        await run_until(manager, state=HubState.AGENT)
+        assert manager._conn is not first_conn
+    finally:
+        await cancel_quietly(task)
+
+
 def test_takeover_reason_token_is_wire_contract() -> None:
     """The canonical token is pinned verbatim — the dashboard's
     EXTERNAL_REASON_TOKENS list must match it by substring, and the WS
