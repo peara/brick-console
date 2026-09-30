@@ -6,6 +6,8 @@ brick-console runs on an always-on Linux machine with a Bluetooth Low Energy ada
 
 ## Status
 
+![CI](https://img.shields.io/github/actions/workflow/status/peara/brick-console/ci.yml?branch=main) ![coverage](docs/badges/coverage.svg)
+
 - **M0 bring-up ✅** (2026-09-24): hub flashed Pybricks v4.0.1, original LEGO firmware backed up, BLE hello-world run from the box.
 - **M1 in progress:** read-only dashboard (BLE manager + hub agent + WebSocket telemetry + minimal web page).
 
