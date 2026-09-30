@@ -3,6 +3,10 @@
 __pycache__/
 *.pyc
 
+# Coverage (the SVG badge in docs/badges/ IS committed; raw reports are not)
+.coverage
+coverage.json
+
 # Firmware binaries & backups (docs live in firmware/README.md)
 firmware/*.zip
 firmware/*.bin
