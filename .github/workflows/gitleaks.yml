@@ -1,0 +1,37 @@
+name: gitleaks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly full-history scan — catches secrets leaked then reverted or
+    # scrubbed from history. Sunday 02:41 UTC: low-traffic window, and the
+    # odd minute avoids the top-of-hour scheduling hotspots GitHub warns
+    # about. Schedule runs fire on the default branch only.
+    - cron: "41 2 * * 0"
+
+jobs:
+  scan:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    # Repo convention: every CI job is bounded. The full-history scan of this
+    # repo took ~0.1 s locally; 5 min leaves ample headroom for runner overhead
+    # (full clone + action setup) and a growing history.
+    timeout-minutes: 5
+    permissions:
+      # Least privilege — scanning needs nothing beyond contents: read.
+      # (PR inline comments are skipped without pull-requests: write; findings
+      # still fail the job and land in the run summary + artifact.)
+      contents: read
+    steps:
+      # Full clone: gitleaks scans whatever checkout fetched and never
+      # unshallows itself — checkout's default is a depth-1 shallow clone,
+      # which breaks the push/PR scan ranges and reduces the weekly scan to a
+      # single commit. fetch-depth: 0 matches the action's README example.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
