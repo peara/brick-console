@@ -69,7 +69,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -85,6 +84,7 @@ from pybricksdev.connections.pybricks import (
 from reactivex import Observable
 from reactivex.abc import DisposableBase
 
+from brick_console.fanout import fan_out, guarded_call
 from brick_console.transport import (
     DisconnectListener,
     DiscoveredHub,
@@ -112,16 +112,6 @@ _DISCONNECT_ERRORS = (HubDisconnectError, HubPowerButtonPressedError)
 """pybricksdev exceptions meaning "the hub went away mid-operation" —
 mapped to ``ConnectionError`` so operations surface as disconnects, not
 crashes (the state observable fires ``on_disconnect`` in parallel)."""
-
-
-def _safe(fn: Callable[..., None], /, *args: object) -> None:
-    """Invoke one fan-out listener; a broken consumer must never kill the
-    hub's notification dispatch (R1) — log and continue. Same discipline as
-    the manager's listener fan-outs."""
-    try:
-        fn(*args)
-    except Exception:
-        logger.exception("transport listener failed; continuing")
 
 
 def _describe_program_id(value: object) -> str:
@@ -242,7 +232,7 @@ class _DisconnectBridge:
     def _fire(self) -> None:
         self._fired = True
         logger.debug("hub connection dropped; notifying")
-        _safe(self._on_disconnect)
+        guarded_call(self._on_disconnect)
 
     def deactivate(self) -> None:
         """Silence the bridge without firing — teardown of bridging left
@@ -468,7 +458,7 @@ class PybricksDevTransport(Transport):
             return
 
         def snapshot(flags: StatusFlag) -> None:
-            _safe(listener, StatusFlags(int(flags)))
+            guarded_call(listener, StatusFlags(int(flags)))
 
         # Subscribe → BehaviorSubject delivers the cached snapshot
         # synchronously → dispose: exactly one delivery, no lingering
@@ -500,8 +490,7 @@ class PybricksDevTransport(Transport):
         """Forward every raw stdout payload to all registered listeners,
         untouched (D1/D4: splitting, parsing, and WS fan-out are consumer
         concerns — the transport hands over bytes only)."""
-        for listener in tuple(self._stdout_listeners):
-            _safe(listener, data)
+        fan_out(self._stdout_listeners, data)
 
     def _on_status_report(self, flags: StatusFlag) -> None:
         """Forward every status report to all registered listeners, the
@@ -520,8 +509,7 @@ class PybricksDevTransport(Transport):
         change.
         """
         word = StatusFlags(int(flags))
-        for listener in tuple(self._status_listeners):
-            _safe(listener, word)
+        fan_out(self._status_listeners, word)
         hub = self._hub
         if isinstance(hub, _HubProtocol):
             running_program = getattr(hub, "_running_program", 0)
