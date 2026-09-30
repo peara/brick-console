@@ -12,6 +12,9 @@ listener; ws mock fan-out is guarded), now pinned once at the source.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+
+import pytest
 
 from brick_console.events import Battery, HubInfo, Imu, TelemetryEvent
 from brick_console.fanout import (
@@ -38,7 +41,7 @@ def test_guarded_call_invokes_listener() -> None:
     assert calls == [(1, 2)]
 
 
-def test_guarded_call_swallows_and_logs(caplog) -> None:
+def test_guarded_call_swallows_and_logs(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.ERROR, logger="brick_console.fanout"):
         guarded_call(boom, "payload")
     records = [r for r in caplog.records if r.exc_info is not None]
@@ -117,12 +120,15 @@ def test_subscribe_into_keeps_other_listeners() -> None:
 
 
 def make_router() -> tuple[
-    TelemetryRouter, TelemetryStore, list[bytes], list[TelemetryEvent]
+    TelemetryRouter,
+    TelemetryStore,
+    list[Callable[[bytes], None]],
+    list[Callable[[TelemetryEvent], None]],
 ]:
     """A router over a real store and live registries (shared lists)."""
     store = TelemetryStore()
-    raw_listeners: list[bytes] = []
-    telemetry_listeners: list[TelemetryEvent] = []
+    raw_listeners: list[Callable[[bytes], None]] = []
+    telemetry_listeners: list[Callable[[TelemetryEvent], None]] = []
     router = TelemetryRouter(
         store,
         raw_listeners=raw_listeners,
@@ -150,19 +156,19 @@ def test_router_routes_raw_first_then_event_in_order() -> None:
 def test_router_raw_path_includes_malformed_events_none() -> None:
     router, store, raw_listeners, telemetry_listeners = make_router()
     raw_seen: list[bytes] = []
+    telemetry_seen: list[TelemetryEvent] = []
 
     raw_listeners.append(raw_seen.append)
-    telemetry_listeners.append(
-        lambda event: (_ for _ in ()).throw(
-            AssertionError("malformed lines must not reach the telemetry fan-out")
-        )
-    )
+    telemetry_listeners.append(telemetry_seen.append)
 
     router.route([(b"garbage not json", None)])
 
     assert raw_seen == [b"garbage not json"]
     assert store.replay_raw_lines(10) == [b"garbage not json"]
     assert store.event_count == 0
+    # The malformed line must stop after the raw path — the telemetry
+    # fan-out sees nothing.
+    assert telemetry_seen == []
 
 
 def test_router_caches_hub_info_only_for_hub_info() -> None:
@@ -214,8 +220,8 @@ def test_router_fan_out_is_guarded() -> None:
 
 def test_router_shares_live_registries_after_construction() -> None:
     store = TelemetryStore()
-    raw_listeners: list[bytes] = []
-    telemetry_listeners: list[TelemetryEvent] = []
+    raw_listeners: list[Callable[[bytes], None]] = []
+    telemetry_listeners: list[Callable[[TelemetryEvent], None]] = []
     router = TelemetryRouter(
         store,
         raw_listeners=raw_listeners,
