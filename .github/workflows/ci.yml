@@ -30,8 +30,11 @@ jobs:
           uv run ruff check .
           uv run ruff format --check .
 
+      - name: Type check (mypy)
+        run: uv run mypy src/
+
       - name: Test (pytest)
-        run: uv run pytest -q
+        run: uv run pytest --cov=brick_console --cov-report=term -q
         env:
           # Hub tests stay gated OFF in CI — no BLE hardware in runners
           BRICK_CONSOLE_HUB_TESTS: ""
@@ -46,4 +49,48 @@ jobs:
           if ! grep -q 'uv run pytest' <<< "$PR_BODY" && ! grep -qi 'deviat' <<< "$PR_BODY"; then
             echo "::error::PR body is missing the Done-when status (pytest/ruff checkboxes) — fill in the PR template"
             exit 1
+          fi
+
+  badge:
+    # Commit the coverage SVG back — push runs only: GITHUB_TOKEN pushes
+    # never re-trigger workflows, and a PR run would race its own branch.
+    # PRs refresh the badge when their branch merges (push to main).
+    if: github.event_name == 'push'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Measure coverage + render badge
+        run: |
+          uv run pytest --cov=brick_console --cov-report=json:coverage.json -q
+          uv run python scripts/coverage_badge.py
+
+      - name: Commit badge if changed
+        # checkout@v4 persists GITHUB_TOKEN git credentials; permissions above scope the push.
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/badges/coverage.svg
+          if git diff --cached --quiet; then
+            echo "coverage badge unchanged — nothing to commit"
+          else
+            git commit -m "chore: refresh coverage badge"
+            git push
           fi

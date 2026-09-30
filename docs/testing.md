@@ -22,6 +22,8 @@ Established 2026-09-24 with the tooling baseline (issue #1). This doc grows with
 ```bash
 uv run pytest                                   # full suite; hub tests auto-skip
 BRICK_CONSOLE_HUB_TESTS=1 uv run pytest         # opt in to hardware tests
+uv run pytest --cov=brick_console --cov-report=term -q   # suite + coverage table
+uv run mypy src/                                # type check (src fence; tests not checked yet)
 uv run ruff check .                             # lint
 uv run ruff format --check .                    # formatting
 ```
@@ -58,6 +60,5 @@ There is no pytest on the hub. Two stages:
 
 ## Deliberately not (yet)
 
-- **No CI workflow** — deferred by choice (single-user private repo). Revisit when the suite carries real weight.
 - **No fake-hub/sim tier yet** — now unblocked: the wire-schema ADR (D7) defines what a fake hub must simulate — CRLF-terminated canonical lines split at arbitrary chunk boundaries (including mid-CRLF), all four kinds at cadence, occasional malformed lines, occasional unknown kinds. The WS gateway's mock source (`?mock=1`, architecture §2.3) is the first instance of that tier. The `Transport` seam (D6) is what BLE-adjacent tests fake meanwhile.
 - **No motor tests, ever** — manual QA only (AGENTS.md safety rule 2).

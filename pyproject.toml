@@ -15,10 +15,12 @@ brick-console = "brick_console.run:main"
 
 [dependency-groups]
 dev = [
+    "httpx2>=2.13.1",
+    "mypy>=1.13",
     "pytest>=8",
     "pytest-asyncio>=0.25",
+    "pytest-cov>=6",
     "ruff>=0.8",
-    "httpx2>=2.13.1",
 ]
 
 [build-system]
@@ -41,3 +43,15 @@ markers = [
 
 [tool.ruff]
 target-version = "py312"
+
+[tool.mypy]
+# Fence: src only — tests stay unchecked for now (issue #31); --strict is a
+# future decision. Bare `uv run mypy` must never widen this scope by accident.
+python_version = "3.12"
+files = ["src"]
+
+[[tool.mypy.overrides]]
+# pybricksdev ships no stubs/py.typed; its surface is pinned by
+# docs/research/pybricksdev-api-notes.md — the only module this leniency covers.
+module = "pybricksdev.*"
+ignore_missing_imports = true

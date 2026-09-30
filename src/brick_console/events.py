@@ -368,7 +368,9 @@ def _decode_port(obj: dict[str, JsonValue]) -> Port:
     fields: dict[str, JsonValue] = {}
     for wire_key, py_name, type_tag in _PORT_SPECS.get(dev, ()):
         fields[py_name] = _take(obj, wire_key, _VALIDATORS[type_tag], f"port {dev}")
-    return Port(port=p, device=dev, **fields)
+    # dynamic-by-design: kwargs are keyed by the _PORT_SPECS wire table and
+    # each value is already _VALIDATORS-checked against its field's type.
+    return Port(port=p, device=dev, **fields)  # type: ignore[arg-type]  # see above
 
 
 def decode(line: str | bytes) -> TelemetryEvent:

@@ -173,7 +173,7 @@ def create_app(
     # Fallback if a request runs outside the lifespan context (uptime then
     # counts from factory time); the lifespan re-stamps on startup.
     app.state.started_at = monotonic()
-    app.state.manager_task: asyncio.Task[None] | None = None
+    app.state.manager_task = None
 
     @app.get("/healthz")
     async def healthz() -> dict[str, object]:
@@ -205,6 +205,7 @@ def create_app(
     return app
 
 
+@contextlib.asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Lifespan manager: run the manager task alongside the web tier.
 

@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 
@@ -137,7 +137,7 @@ def _noop_unsubscribe() -> None:
     """Idempotent no-op the stub subscriptions return."""
 
 
-def bind_config(env: dict[str, str] | None = None) -> tuple[str, int]:
+def bind_config(env: Mapping[str, str] | None = None) -> tuple[str, int]:
     """Resolve ``(host, port)`` from the environment (or the given mapping,
     for tests). Port parsing is strict: anything other than a plain
     integer string in 1-65535 — no whitespace, no sign, no decimal —
