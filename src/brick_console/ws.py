@@ -95,6 +95,7 @@ from brick_console.events import (
     TelemetryEvent,
     encode,
 )
+from brick_console.fanout import TelemetryRouter, subscribe_into
 from brick_console.parsing import TelemetryParser
 from brick_console.store import TelemetryStore
 
@@ -162,15 +163,6 @@ class EventSource(Protocol):
     def subscribe_raw(
         self, listener: Callable[[bytes], None]
     ) -> Callable[[], None]: ...
-
-
-def _guarded_call(fn: Callable[..., None], /, *args: object) -> None:
-    """Invoke one fan-out listener; a broken consumer must never kill the
-    feed — log and continue (the BLE manager's ``_safe_call`` discipline)."""
-    try:
-        fn(*args)
-    except Exception:
-        logger.exception("event listener failed; continuing")
 
 
 # ---------------------------------------------------------------------------
@@ -432,10 +424,10 @@ class MockSource:
     BLE, no ``Transport``, no adapter import — typed events are built
     here, emitted through the real ``events.encode`` →
     ``TelemetryParser.feed_with_raw`` path (the identical schema path as
-    live mode), and routed to this source's own store + listener fan-out
-    exactly the way the BLE manager routes hub stdout (D7
-    raw-log-primary: raw line first, parsed event on top, malformed lines
-    included).
+    live mode), and routed by the shared
+    :class:`~brick_console.fanout.TelemetryRouter` to this source's own
+    store + listener fan-out — the identical pipeline object the BLE
+    manager's stdout pipe uses, not a re-implementation.
 
     Identity: ``hub_info`` is emitted once at construction (the simulated
     connect; D7: once per connect), so every join sees the snapshot —
@@ -463,6 +455,13 @@ class MockSource:
         self._state_listeners: list[Callable[[str, str, float], None]] = []
         self._telemetry_listeners: list[Callable[[TelemetryEvent], None]] = []
         self._raw_listeners: list[Callable[[bytes], None]] = []
+        # Shares the registries above: subscriptions keep working after
+        # construction (fanout.TelemetryRouter owns only the routing).
+        self._router = TelemetryRouter(
+            self._store,
+            raw_listeners=self._raw_listeners,
+            telemetry_listeners=self._telemetry_listeners,
+        )
         self._task: asyncio.Task[None] | None = None
         self._clients = 0
         self._tick = 0
@@ -510,11 +509,11 @@ class MockSource:
     ) -> Callable[[], None]:
         """Register for each synthetic parsed event; idempotent
         unsubscribe, like the manager's pattern."""
-        return _subscribe_into(self._telemetry_listeners, listener)
+        return subscribe_into(self._telemetry_listeners, listener)
 
     def subscribe_raw(self, listener: Callable[[bytes], None]) -> Callable[[], None]:
         """Register for each synthetic raw line; idempotent unsubscribe."""
-        return _subscribe_into(self._raw_listeners, listener)
+        return subscribe_into(self._raw_listeners, listener)
 
     # -- Lifecycle ---------------------------------------------------------
 
@@ -591,36 +590,7 @@ class MockSource:
 
     def _emit(self, event: TelemetryEvent) -> None:
         """Encode → real parser → route: the identical schema path as a
-        live hub's stdout (one event per call)."""
-        self._route(self._parser.feed_with_raw(encode(event)))
-
-    def _route(self, pairs: list[tuple[bytes, TelemetryEvent | None]]) -> None:
-        """Route parsed ``(raw, event)`` pairs the way the manager's
-        stdout pipe does: raw line to the ring + log fan-out first, then
-        the parsed event to the ring, the ``hub_info`` cache, and the
-        telemetry fan-out (malformed lines included in the raw path)."""
-        for raw, event in pairs:
-            self._store.append_raw_line(raw)
-            for listener in tuple(self._raw_listeners):
-                _guarded_call(listener, raw)
-            if event is None:
-                continue  # malformed: counted and logged by the parser
-            self._store.append_event(event)
-            if isinstance(event, HubInfo):
-                self._store.set_hub_info(event)
-            for listener in tuple(self._telemetry_listeners):
-                _guarded_call(listener, event)
-
-
-def _subscribe_into[Listener](
-    listeners: list[Listener], listener: Listener
-) -> Callable[[], None]:
-    """The manager's subscription pattern: idempotent unsubscribe via
-    list remove (``ValueError`` suppressed)."""
-    listeners.append(listener)
-
-    def unsubscribe() -> None:
-        with contextlib.suppress(ValueError):
-            listeners.remove(listener)
-
-    return unsubscribe
+        live hub's stdout (one event per call). The routing order (D7:
+        raw first, parsed event on top) lives in the shared router —
+        :mod:`brick_console.fanout` — exactly the manager's pipeline."""
+        self._router.route(self._parser.feed_with_raw(encode(event)))

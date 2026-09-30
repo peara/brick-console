@@ -77,9 +77,14 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol
 
-from brick_console.events import HubInfo, TelemetryEvent
+from brick_console.events import TelemetryEvent
+from brick_console.fanout import (
+    TelemetryRouter,
+    TelemetrySink,
+    fan_out,
+    subscribe_into,
+)
 from brick_console.parsing import TelemetryParser
 from brick_console.transport import DisconnectListener, StatusFlags, Transport
 
@@ -143,14 +148,8 @@ TelemetryListener = Callable[[TelemetryEvent], None]
 gateway; the telemetry store is fed in parallel and owns replay/history."""
 
 
-class TelemetrySink(Protocol):
-    """The store seam the manager feeds — structurally satisfied by the
-    telemetry store (ring buffer + raw-line ring + ``hub_info`` cache)."""
-
-    def append_event(self, event: TelemetryEvent) -> int: ...
-    def append_raw_line(self, line: bytes) -> None: ...
-    def set_hub_info(self, hub_info: HubInfo) -> None: ...
-    def mark_connection_start(self) -> None: ...
+# ``TelemetrySink`` (imported from fanout above) is re-exported: the store
+# seam used to be defined here, and existing imports keep working.
 
 
 @dataclass(frozen=True)
@@ -225,15 +224,6 @@ class _Connection:
     last_status_at: float
 
 
-def _safe_call(fn: Callable[..., None], /, *args: object) -> None:
-    """Invoke one fan-out listener; a broken consumer must never kill the
-    always-on loop (R1) — log and continue."""
-    try:
-        fn(*args)
-    except Exception:
-        logger.exception("event listener failed; continuing")
-
-
 class BLEManager:
     """Owns the hub connection lifecycle: discover → connect → agent install
     → telemetry pipes, with automatic recovery (architecture §4.5).
@@ -265,6 +255,11 @@ class BLEManager:
         self._state_listeners: list[StateListener] = []
         self._telemetry_listeners: list[TelemetryListener] = []
         self._raw_listeners: list[RawLineListener] = []
+        self._router = TelemetryRouter(
+            store,
+            raw_listeners=self._raw_listeners,
+            telemetry_listeners=self._telemetry_listeners,
+        )
         self._backoff = _Backoff(
             base=self._config.backoff_base, ceiling=self._config.backoff_ceiling
         )
@@ -314,13 +309,7 @@ class BLEManager:
         Returns an idempotent unsubscribe function. Fan-out is guarded: a
         raising listener is logged and never kills the loop.
         """
-        self._state_listeners.append(listener)
-
-        def unsubscribe() -> None:
-            with contextlib.suppress(ValueError):
-                self._state_listeners.remove(listener)
-
-        return unsubscribe
+        return subscribe_into(self._state_listeners, listener)
 
     def subscribe_telemetry(self, listener: TelemetryListener) -> Callable[[], None]:
         """Register for each parsed telemetry event (live feed).
@@ -328,13 +317,7 @@ class BLEManager:
         Returns an idempotent unsubscribe function. The store remains the
         authority for replay/history — this is the live seam only.
         """
-        self._telemetry_listeners.append(listener)
-
-        def unsubscribe() -> None:
-            with contextlib.suppress(ValueError):
-                self._telemetry_listeners.remove(listener)
-
-        return unsubscribe
+        return subscribe_into(self._telemetry_listeners, listener)
 
     def subscribe_raw(self, listener: RawLineListener) -> Callable[[], None]:
         """Register for each raw stdout line (live ``log`` fan-out, D7
@@ -345,13 +328,7 @@ class BLEManager:
         ring remains the authority for raw retention/history — this is the
         live seam only.
         """
-        self._raw_listeners.append(listener)
-
-        def unsubscribe() -> None:
-            with contextlib.suppress(ValueError):
-                self._raw_listeners.remove(listener)
-
-        return unsubscribe
+        return subscribe_into(self._raw_listeners, listener)
 
     def transitions(self) -> list[StateTransition]:
         """Bounded transition history (all sessions, oldest first)."""
@@ -615,24 +592,19 @@ class BLEManager:
     # ------------------------------------------------------------------
 
     def _on_stdout(self, data: bytes) -> None:
-        """Raw-log-primary fan-out (D7): one split, raw line first, telemetry
-        parsing attached on top — nothing the hub prints is ever dropped."""
+        """Raw-log-primary fan-out (D7 — the routing order lives in
+        :class:`~brick_console.fanout.TelemetryRouter`): one split, raw line
+        first, telemetry parsing attached on top — nothing the hub prints
+        is ever dropped. The per-line DEBUG log stays here: a manager
+        observability concern, not a pipeline one."""
         conn = self._conn
         if conn is None:
             logger.warning("stdout chunk with no connection; dropped: %r", data[:64])
             return
-        for raw, event in conn.parser.feed_with_raw(data):
-            self._store.append_raw_line(raw)
-            for listener in tuple(self._raw_listeners):
-                _safe_call(listener, raw)
+        pairs = conn.parser.feed_with_raw(data)
+        self._router.route(pairs)
+        for raw, _ in pairs:
             logger.debug("hub stdout: %r", raw)
-            if event is None:
-                continue  # malformed: counted and logged by the parser
-            self._store.append_event(event)
-            if isinstance(event, HubInfo):
-                self._store.set_hub_info(event)
-            for listener in tuple(self._telemetry_listeners):
-                _safe_call(listener, event)
 
     def _on_status(self, flags: StatusFlags) -> None:
         """Derive program-lifecycle edges from status snapshots (§4 rule 2)
@@ -698,5 +670,4 @@ class BLEManager:
             StateTransition(from_state, to, timestamp, reason, self._session)
         )
         logger.info("state %s -> %s (%s)", from_state.value, to.value, reason)
-        for listener in tuple(self._state_listeners):
-            _safe_call(listener, to, reason, timestamp)
+        fan_out(self._state_listeners, to, reason, timestamp)
