@@ -20,16 +20,20 @@ the takeover path. Hardware observation (2026-09-29, harness
 - **Held-hub facts:** a held hub never advertises in normal mode (invisible
   to scanners); a second-central connect is refused (30 s BlueZ timeout)
   without disturbing the holder. Takeover requires an open pairing window,
-  and the BT button is a **no-op while a program runs** (observed
-  2026-09-30) — so while the console's agent holds the hub, no new window
-  can be opened; the user must power-press to stop the agent, then press
-  BT in the ~5 s reinstall idle window. But a window opened while the hub
-  was idle **stays open after a connect** (observed 23:05: the app kicked
-  the console's live agent session through the still-open window ~30 s
-  after the console connected) — so the likelier production takeover is
-  the user pressing BT, the always-on console reconnecting through the
-  window first, and the user then connecting from the app. Within pairing
-  mode, last-central-wins kicks the incumbent silently.
+  and the BT button is a **no-op while a program runs** (observed 2026-09-30,
+  owner-confirmed from the app side) — so while the console's agent holds
+  the hub, no new window can be opened; the user must power-press to stop
+  the agent, then press BT in the ~5 s reinstall idle window. A window
+  opened while the hub was held-but-idle keeps accepting connections
+  (observed 22:54 and 23:05, in both directions) — the practical takeover
+  shapes are therefore: (a) console off/idle-hub BT press → user app
+  connects through the window, console later reconnects and is not kicked
+  (window already claimed); (b) console holding → power-press + BT inside
+  the reinstall gap → app connects through the window → kick. With the
+  always-on agent, shape (b) is the only path while the console runs —
+  which is why a release-the-hub toggle (server-side hold-off) is the
+  product-level answer to "let someone else use the hub" (tracked in
+  issues). Within pairing mode, last-central-wins kicks silently.
 
 **Decision:** takeover is detected by *signature*, not by event:
 
