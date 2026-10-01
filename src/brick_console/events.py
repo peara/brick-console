@@ -4,9 +4,10 @@ Everything the dashboard ever shows — battery, ports, IMU, hub identity —
 travels as *telemetry events* (D7 terminology): small JSON lines the
 hub-side ``brick_telemetry`` agent prints over hub stdout, one JSON object
 per ``print()``. This module is the contract both sides code against: the
-hub-side encoder (a later issue) emits the canonical lines below; the server
-decodes them (:func:`decode`) into typed events and can re-emit
-(:func:`encode`) byte-exactly. Turning raw stdout *bytes* into lines and
+hub-side encoder (the ``brick_telemetry`` library in ``agent/``) emits the
+canonical lines below; the server decodes them (:func:`decode`) into typed
+events and can re-emit (:func:`encode`) byte-exactly. Turning raw stdout
+*bytes* into lines and
 lines into events — framing, chunk buffering, the malformed counter — is
 :mod:`brick_console.parsing`'s job; this module is pure wire ⇄ Python.
 
