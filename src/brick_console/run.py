@@ -7,15 +7,14 @@ the web tier sharing it (architecture §8: async-native pairs with bleak;
 no worker processes — the app owns the single BLE central role, F6, and
 multiple workers would fight over it).
 
-Manager wiring today: a *stub*, per the issue ("the manager handle can be
-a stub now"). The real manager needs the hub-side agent program
-(``agent/agent_main.py``, not yet landed) to install; until then the run
-command serves with ``StubManager`` — hub state pinned to ``offline``, no
-BLE touched. The telemetry store *is* wired for real (a stub manager
-produces no telemetry, but the store seam is ready for the WS-gateway
-deliverable to consume on ``app.state``). When the agent lands, the stub
-is replaced by constructing the real ``BLEManager`` over the bleak adapter
-(:mod:`brick_console.adapter`) — same injected seams, zero app changes.
+Manager wiring: the real :class:`~brick_console.ble_manager.BLEManager` over
+the bleak/pybricksdev adapter (:mod:`brick_console.adapter`) — same injected
+seams as the stub, zero app changes (issue #15). The imports live inside
+``main()`` on purpose: importing ``brick_console.run`` must stay lightweight
+(no bleak, no pybricksdev) so the offline fallback path and the module
+isolation tests hold. :class:`StubManager` stays in this module as the
+documented fallback for BLE-less environments — it is simply no longer what
+``main()`` wires.
 
 Configuration (environment):
 
@@ -82,12 +81,12 @@ def _package_version() -> str:
 
 
 class StubManager:
-    """Placeholder manager (issue #10: "the manager handle can be a stub
-    now"): reports the hub as offline forever, ``run()`` parks until
-    cancelled (lifespan shutdown). The real ``BLEManager`` replaces this
-    once the agent program (``agent/``) lands — same injected seam, zero
-    app changes (the run command constructs it here and passes it to
-    :func:`~brick_console.app.create_app`).
+    """Offline fallback manager (kept from issue #10): reports the hub as
+    offline forever, ``run()`` parks until cancelled (lifespan shutdown).
+    The run command wires the real
+    :class:`~brick_console.ble_manager.BLEManager` since the agent program
+    (``agent/``) landed; this class remains for BLE-less environments and
+    the module-isolation tests — same injected seam, zero app changes.
 
     Subscription no-ops: the WS gateway subscribes to the state,
     telemetry, and raw-line fan-outs; a manager that lacks them would
@@ -167,10 +166,20 @@ def bind_config(env: Mapping[str, str] | None = None) -> tuple[str, int]:
 def main() -> None:
     """Console-script entry point (``[project.scripts]`` → ``brick-console``)."""
     host, port = bind_config()
-    # Real store wired even under the stub manager: the WS-gateway
-    # deliverable consumes app.state.store, so production must never hold
-    # None there (a stub manager leaves it empty, not absent).
-    app = create_app(StubManager(), store=TelemetryStore(), version=_package_version())
+    # Real manager wiring (issue #15): BLEManager over the bleak/pybricksdev
+    # adapter, same injected seams as the stub — zero app changes. Imports
+    # stay local so importing this module pulls in no BLE stack: the
+    # offline fallback (StubManager) and the module-isolation tests
+    # depend on brick_console.run staying import-light.
+    from brick_console.adapter import PybricksDevTransport
+    from brick_console.ble_manager import BLEManager
+
+    store = TelemetryStore()
+    app = create_app(
+        BLEManager(PybricksDevTransport(), store),
+        store=store,
+        version=_package_version(),
+    )
     # uvicorn's default logging config (log_config untouched) is the
     # journalctl story: formatted INFO lines — startup, shutdown, access —
     # on stderr, which systemd captures. Passing log_config=None would
