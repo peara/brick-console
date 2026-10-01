@@ -24,6 +24,11 @@ ATTACHED: dict = {}
 READS: dict = {}
 READ_ERRORS: set = set()
 CONSTRUCTED: list = []
+CALLS: dict = {}
+
+
+def note_call(port, attr: str) -> None:
+    CALLS[(port, attr)] = CALLS.get((port, attr), 0) + 1
 
 
 def reset() -> None:
@@ -31,6 +36,7 @@ def reset() -> None:
     READS.clear()
     READ_ERRORS.clear()
     CONSTRUCTED.clear()
+    CALLS.clear()
 
 
 class Hsv:
@@ -53,6 +59,7 @@ class _PUPDevice:
     def _read(self, attr: str):
         if self.port in READ_ERRORS:
             raise OSError(ENODEV)
+        note_call(self.port, attr)
         override = READS.get(self.port, {})
         if attr in override:
             return override[attr]

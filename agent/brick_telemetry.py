@@ -1,10 +1,18 @@
-"""Hub-side telemetry agent library (issue #15, decision D7).
+"""Hub-side telemetry agent library (issue #15, decisions D7 + D9).
 
 Prints D7-canonical JSON lines on stdout: ``hub_info`` once per start,
 ``battery`` about once a second, and ``imu`` plus one line per attached
 device at ~10 Hz. Lines are byte-compatible with the server reference
 (:mod:`brick_console.events`): compact separators, canonical wire key
 order, CRLF added by ``print()`` on the hub.
+
+Freshness (D9): same-mode fields are read fresh every cycle; cross-mode
+secondary fields (ColorSensor ``amb``, UltrasonicSensor ``pr``,
+ColorDistanceSensor ``d``/``amb``) re-read every ``SECONDARY_REFRESH``
+cycles with the last value cached between — a PUP mode switch costs
+30-60 ms, and four per cycle would cap the loop at ~4 Hz with the full
+kit attached. Caches seed at attach, so the first line after discovery
+carries measured values.
 
 Byte-exactness is by construction, not dict luck: MicroPython dicts are
 hash-ordered (no OrderedDict on this firmware), so lines are built by
@@ -37,8 +45,10 @@ from pybricks.tools import StopWatch, wait
 __all__ = [
     "BATTERY_PERIOD",
     "HUB_MODEL",
+    "SECONDARY_REFRESH",
     "TelemetryAgent",
     "battery_pct",
+    "letter_offset",
     "run",
 ]
 
@@ -46,6 +56,16 @@ HUB_MODEL = "technichub"
 BATTERY_PERIOD = 10
 """Cycles between battery lines: the cycle runs at ~10 Hz, so every
 10th cycle is ~1 Hz (D7)."""
+SECONDARY_REFRESH = 10
+"""Cycles between cross-mode secondary reads (D9): ~1 s at 10 Hz, the
+same cadence class as battery. Per-port staggered offsets spread the
+mode-switch chains evenly across the window."""
+
+
+def letter_offset(letter):
+    """A=0 .. F=5 — the D9 per-port refresh stagger."""
+    return ord(letter) - 65
+
 
 _PORTS = (
     (Port.A, "A"),
@@ -125,51 +145,122 @@ def battery_pct(voltage_mv):
     return low_pct + (high_pct - low_pct) * (voltage_mv - low_mv) // (high_mv - low_mv)
 
 
-def _read_motor(dev):
-    return f'"angle":{dev.angle()},"speed":{dev.speed()},"load":{dev.load()}'
+class _Reader:
+    """Per-device field reader (D9): primary fields fresh every cycle
+    (same-mode reads, 0 ms), secondary fields re-read every
+    ``SECONDARY_REFRESH`` cycles with the last value cached between.
+    The cache seeds at attach (the one-time mode chain is paid inside
+    discovery's blocking construct), so the first line after discovery
+    carries genuinely measured secondaries — never placeholder zeros.
+    """
+
+    def __init__(self, dev):
+        self.dev = dev
+        self.amb = dev.ambient()
+
+    def read(self, cycle):
+        hsv = self.dev.hsv()
+        col = _COLOR_NAMES.get(self.dev.color(), "none")
+        return f'"refl":{self.dev.reflection()},"amb":{self.amb},"h":{hsv.h},"s":{hsv.s},"v":{hsv.v},"col":"{col}"'
+
+    def refresh(self):
+        # Secondaries first: the cycle ends on the primary mode, so
+        # non-refresh cycles pay zero mode switches.
+        self.amb = self.dev.ambient()
+        self.dev.reflection()
 
 
-def _read_color_sensor(dev):
-    hsv = dev.hsv()
-    col = _COLOR_NAMES.get(dev.color(), "none")
-    return f'"refl":{dev.reflection()},"amb":{dev.ambient()},"h":{hsv.h},"s":{hsv.s},"v":{hsv.v},"col":"{col}"'
+class _ColorReader(_Reader):
+    pass
 
 
-def _read_ultrasonic(dev):
-    pr = "true" if dev.presence() else "false"
-    return f'"d":{dev.distance()},"pr":{pr}'
+class _UltrasonicReader(_Reader):
+    def __init__(self, dev):
+        self.dev = dev
+        self.pr = dev.presence()
+
+    def read(self, cycle):
+        pr = "true" if self.pr else "false"
+        return f'"d":{self.dev.distance()},"pr":{pr}'
+
+    def refresh(self):
+        self.pr = self.dev.presence()
+        self.dev.distance()
 
 
-def _read_force(dev):
-    f = json.dumps(dev.force())
-    d = json.dumps(dev.distance())
-    pressed = "true" if dev.pressed() else "false"
-    return f'"f":{f},"d":{d},"pressed":{pressed}'
+class _ForceReader(_Reader):
+    def __init__(self, dev):
+        self.dev = dev
+
+    def read(self, cycle):
+        f = json.dumps(self.dev.force())
+        d = json.dumps(self.dev.distance())
+        pressed = "true" if self.dev.pressed() else "false"
+        return f'"f":{f},"d":{d},"pressed":{pressed}'
+
+    def refresh(self):
+        pass
 
 
-def _read_color_distance(dev):
-    hsv = dev.hsv()
-    col = _COLOR_NAMES.get(dev.color(), "none")
-    return f'"d":{dev.distance()},"refl":{dev.reflection()},"amb":{dev.ambient()},"h":{hsv.h},"s":{hsv.s},"v":{hsv.v},"col":"{col}"'
+class _ColorDistanceReader(_Reader):
+    def __init__(self, dev):
+        self.dev = dev
+        self.d = dev.distance()
+        self.amb = dev.ambient()
+
+    def read(self, cycle):
+        hsv = self.dev.hsv()
+        col = _COLOR_NAMES.get(self.dev.color(), "none")
+        return f'"d":{self.d},"refl":{self.dev.reflection()},"amb":{self.amb},"h":{hsv.h},"s":{hsv.s},"v":{hsv.v},"col":"{col}"'
+
+    def refresh(self):
+        self.d = self.dev.distance()
+        self.amb = self.dev.ambient()
+        self.dev.reflection()
 
 
-def _read_tilt(dev):
-    pitch, roll = dev.tilt()
-    return f'"pitch":{pitch},"roll":{roll}'
+class _TiltReader(_Reader):
+    def __init__(self, dev):
+        self.dev = dev
+
+    def read(self, cycle):
+        pitch, roll = self.dev.tilt()
+        return f'"pitch":{pitch},"roll":{roll}'
+
+    def refresh(self):
+        pass
 
 
-def _read_infrared(dev):
-    return f'"d":{dev.distance()}'
+class _InfraredReader(_Reader):
+    def __init__(self, dev):
+        self.dev = dev
+
+    def read(self, cycle):
+        return f'"d":{self.dev.distance()}'
+
+    def refresh(self):
+        pass
+
+
+class _MotorReader(_Reader):
+    def __init__(self, dev):
+        self.dev = dev
+
+    def read(self, cycle):
+        return f'"angle":{self.dev.angle()},"speed":{self.dev.speed()},"load":{self.dev.load()}'
+
+    def refresh(self):
+        pass
 
 
 _READERS = {
-    "Motor": _read_motor,
-    "ColorSensor": _read_color_sensor,
-    "UltrasonicSensor": _read_ultrasonic,
-    "ForceSensor": _read_force,
-    "ColorDistanceSensor": _read_color_distance,
-    "TiltSensor": _read_tilt,
-    "InfraredSensor": _read_infrared,
+    "Motor": _MotorReader,
+    "ColorSensor": _ColorReader,
+    "UltrasonicSensor": _UltrasonicReader,
+    "ForceSensor": _ForceReader,
+    "ColorDistanceSensor": _ColorDistanceReader,
+    "TiltSensor": _TiltReader,
+    "InfraredSensor": _InfraredReader,
 }
 
 
@@ -212,27 +303,28 @@ class TelemetryAgent:
         self._cycle += 1
 
     def _port_cycle(self, port, letter):
-        entry = self._devices.get(port)
-        if entry is None:
+        reader = self._devices.get(port)
+        if reader is None:
             self._probe(port)
-            entry = self._devices.get(port)
-        if entry is None:
+            reader = self._devices.get(port)
+        if reader is None:
             return
-        name, dev = entry
         try:
-            fields = _READERS[name](dev)
+            if self._cycle % SECONDARY_REFRESH == letter_offset(letter):
+                reader.refresh()
+            fields = reader.read(self._cycle)
         except OSError:
             # Detach transition (D7): the only time "none" goes on the
-            # wire. The failed device object is dropped; later cycles
-            # re-probe the empty port and stay silent (constructing on an
-            # empty port raises immediately), so "none" prints once.
+            # wire. The failed reader is dropped; later cycles re-probe
+            # the empty port and stay silent (constructing on an empty
+            # port raises immediately), so "none" prints once.
             del self._devices[port]
             if self._last_dev.get(port) != "none":
                 self._last_dev[port] = "none"
                 self._out(f'{{"t":"port","p":"{letter}","dev":"none"}}')
             return
-        self._last_dev[port] = name
-        self._out(f'{{"t":"port","p":"{letter}","dev":"{name}",{fields}}}')
+        self._last_dev[port] = reader.name
+        self._out(f'{{"t":"port","p":"{letter}","dev":"{reader.name}",{fields}}}')
 
     def _probe(self, port):
         for cls, name in _CLASSES:
@@ -240,7 +332,9 @@ class TelemetryAgent:
                 dev = cls(port)
             except OSError:
                 continue
-            self._devices[port] = (name, dev)
+            reader = _READERS[name](dev)
+            reader.name = name
+            self._devices[port] = reader
             return
 
 

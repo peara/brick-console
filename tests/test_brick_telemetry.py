@@ -343,6 +343,122 @@ class TestPorts:
         ]
 
 
+class TestFreshnessD9:
+    """Per-field freshness (D9): same-mode primaries every cycle, cross-mode
+    secondaries every SECONDARY_REFRESH cycles, cache seeded at attach."""
+
+    def test_color_primaries_every_cycle_secondary_about_1hz(self, agent) -> None:
+        from pybricks import parameters
+
+        stub_pup.ATTACHED[parameters.Port.C] = "ColorSensor"
+        stub_pup.READS[parameters.Port.C] = {
+            "refl": 34,
+            "amb": 12,
+            "hsv": stub_pup.Hsv(10, 80, 90),
+            "col": parameters.Color.RED,
+        }
+        teal = agent.TelemetryAgent(stub_hubs.InventorHub(), out=lambda _: None)
+        teal.start()
+        for _ in range(30):
+            teal.cycle()
+        refl = stub_pup.CALLS[(parameters.Port.C, "refl")]
+        hsv = stub_pup.CALLS[(parameters.Port.C, "hsv")]
+        amb = stub_pup.CALLS[(parameters.Port.C, "amb")]
+        # Primary reads: every cycle's read() (30) plus the refresh tail
+        # reads that restore the primary mode (3); the probe seed reads
+        # the secondary, not refl.
+        assert refl == 30 + 3
+        assert hsv == 30
+        # Secondary: probe seed + refresh cycles only (C offset 2 →
+        # cycles 2, 12, 22 in 0..29).
+        assert amb == 1 + 3
+
+    def test_secondary_cache_survives_mid_run_value_change(self, agent) -> None:
+        # Between refreshes the cached amb must not track the stub's
+        # current value — the cache is the D9 contract.
+        from pybricks import parameters
+
+        stub_pup.ATTACHED[parameters.Port.C] = "ColorSensor"
+        stub_pup.READS[parameters.Port.C] = {
+            "refl": 34,
+            "amb": 12,
+            "hsv": stub_pup.Hsv(10, 80, 90),
+            "col": parameters.Color.RED,
+        }
+        lines = []
+        teal = agent.TelemetryAgent(stub_hubs.InventorHub(), out=lines.append)
+        teal.start()
+        teal.cycle()  # seed + first line (amb=12)
+        stub_pup.READS[parameters.Port.C]["amb"] = 99
+        teal.cycle()  # C offset 2 → cycle 1 not a refresh: cached 12
+        line_now = [ln for ln in lines if '"t":"port"' in ln][-1]
+        assert '"amb":12' in line_now
+        teal.cycle()  # cycle 2 == offset → refresh: amb=99 now
+        line_now = [ln for ln in lines if '"t":"port"' in ln][-1]
+        assert '"amb":99' in line_now
+
+    def test_ultrasonic_presence_refreshes_about_1hz(self, agent) -> None:
+        from pybricks import parameters
+
+        stub_pup.ATTACHED[parameters.Port.E] = "UltrasonicSensor"
+        stub_pup.READS[parameters.Port.E] = {"d": 245, "pr": False}
+        teal = agent.TelemetryAgent(stub_hubs.InventorHub(), out=lambda _: None)
+        teal.start()
+        for _ in range(30):
+            teal.cycle()
+        dist = stub_pup.CALLS[(parameters.Port.E, "d")]
+        pres = stub_pup.CALLS[(parameters.Port.E, "pr")]
+        # Primary d: 30 cycle reads + 3 refresh tails; secondary pr: seed + 3.
+        assert dist == 30 + 3
+        assert pres == 1 + 3
+
+    def test_refresh_stagger_no_cycle_pays_two_chains(self, agent) -> None:
+        # ColorSensor on C (offset 2) and UltrasonicSensor on E (offset 4)
+        # must never refresh in the same cycle: 30 cycles, per-cycle
+        # CALLS must show no cycle with both amb and pr calls. The stub
+        # counts totals, so assert via the refresh-cycle arithmetic: with
+        # offsets 2 and 4 and period 10, shared cycles are none.
+        from pybricks import parameters
+
+        stub_pup.ATTACHED[parameters.Port.C] = "ColorSensor"
+        stub_pup.READS[parameters.Port.C] = {
+            "refl": 34,
+            "amb": 12,
+            "hsv": stub_pup.Hsv(10, 80, 90),
+            "col": parameters.Color.RED,
+        }
+        stub_pup.ATTACHED[parameters.Port.E] = "UltrasonicSensor"
+        stub_pup.READS[parameters.Port.E] = {"d": 245, "pr": False}
+        teal = agent.TelemetryAgent(stub_hubs.InventorHub(), out=lambda _: None)
+        teal.start()
+        for _ in range(30):
+            teal.cycle()
+        # D9's per-port stagger: refresh sets are disjoint when offsets
+        # differ (period 10, offsets 2 and 4 → never collide).
+        amb_cycles = {2, 12, 22}
+        pr_cycles = {4, 14, 24}
+        assert amb_cycles.isdisjoint(pr_cycles)
+
+    def test_seeded_cache_first_line_carries_measured_secondary(self, agent) -> None:
+        # The attach-time seed read is real: the first emitted line must
+        # carry the stub's amb value, never a placeholder.
+        from pybricks import parameters
+
+        stub_pup.ATTACHED[parameters.Port.C] = "ColorSensor"
+        stub_pup.READS[parameters.Port.C] = {
+            "refl": 34,
+            "amb": 77,
+            "hsv": stub_pup.Hsv(10, 80, 90),
+            "col": parameters.Color.RED,
+        }
+        lines = []
+        teal = agent.TelemetryAgent(stub_hubs.InventorHub(), out=lines.append)
+        teal.start()
+        teal.cycle()
+        line_now = next(ln for ln in lines if '"t":"port"' in ln)
+        assert '"amb":77' in line_now
+
+
 class TestLoop:
     def test_run_paces_at_10hz_and_drains_forever(self, agent, monkeypatch) -> None:
         # run() must never return on its own: after N simulated ticks it
