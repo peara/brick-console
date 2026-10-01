@@ -18,3 +18,4 @@ Citation rule inside ADRs: cite stable anchors (other ADRs by D-ID, doc sections
 | D6 | accepted (amended 2026-09-25) | 2026-09-24 | All hub access goes through the `Transport` interface | [adr/D6-transport-seam.md](adr/D6-transport-seam.md) |
 | D7 | accepted (amended 2026-09-25 — citations only) | 2026-09-25 | Telemetry wire schema: JSON lines over hub stdout; raw-log-primary fan-out | [adr/D7-telemetry-wire-schema.md](adr/D7-telemetry-wire-schema.md) |
 | D8 | accepted | 2026-09-29 | Takeover detection: liveness probe + canonical reason token | [adr/D8-takeover-detection.md](adr/D8-takeover-detection.md) |
+| D9 | accepted | 2026-10-02 | Per-field freshness under PUP mode-switch costs: same-mode fields every cycle, cross-mode secondaries ~1 s cached | [adr/D9-pup-mode-switch-freshness.md](adr/D9-pup-mode-switch-freshness.md) |
