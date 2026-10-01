@@ -29,6 +29,7 @@ from fastapi.testclient import TestClient
 from brick_console.app import create_app
 from brick_console.events import HubInfo, TelemetryEvent
 from brick_console.store import TelemetryStore
+from brick_console.transport import Transport
 from brick_console.ws import (
     ClientQueue,
     MockSource,
@@ -758,24 +759,49 @@ def test_client_queue_no_drop_under_capacity() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Production wiring — StubManager + register_routes ordering
+# Production wiring — real BLEManager + register_routes ordering
 # ---------------------------------------------------------------------------
 
 
-def test_stub_manager_ws_join_does_not_crash() -> None:
-    # The production wiring today: run.py constructs StubManager. The
-    # gateway must serve the join (state → snapshot-if-any → replay) and
-    # park in the receive loop without touching BLE or crashing.
-    from brick_console.run import StubManager
+def test_offline_manager_ws_join_does_not_crash() -> None:
+    # The production wiring since #15: run.py constructs the real
+    # BLEManager. With the hub off (the only BLE-free way to run the real
+    # manager), the gateway must serve the join (state → snapshot-if-any →
+    # replay) and park in the receive loop without touching BLE or
+    # crashing — the same join-sequence regression the stub version
+    # guarded, now over the real manager's state machine.
+    from brick_console.ble_manager import BLEManager
     from brick_console.store import TelemetryStore
 
-    app = create_app(StubManager(), store=TelemetryStore())
+    class HubOffTransport(Transport):
+        async def discover(self, name, *, timeout=10.0):
+            raise TimeoutError()
+
+        async def connect(self, hub, *, on_disconnect): ...
+
+        async def install_and_start(self, program, *, wait=False): ...
+
+        async def stop(self): ...
+
+        async def probe(self): ...
+
+        async def write_stdin(self, data): ...
+
+        async def subscribe_stdout(self, listener): ...
+
+        async def subscribe_status(self, listener): ...
+
+        async def disconnect(self): ...
+
+    app = create_app(
+        BLEManager(HubOffTransport(), TelemetryStore()), store=TelemetryStore()
+    )
     with TestClient(app) as client, client.websocket_connect("/ws") as ws:
         got = [ws.receive_json() for _ in range(1)]
 
     assert got[0]["type"] == "state"
     assert got[0]["data"]["state"] == "offline"
-    assert "stub" in got[0]["data"]["reason"]
+    assert got[0]["data"]["reason"]  # always the OFFLINE story (scan-miss or starting)
 
 
 def test_ws_route_wins_over_static_mount(tmp_path) -> None:
