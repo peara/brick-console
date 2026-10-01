@@ -28,7 +28,13 @@ Configuration (environment):
 Logging: uvicorn's default access/error logging is kept — structured enough
 for ``journalctl`` (timestamps, level, client address on access lines); no
 extra JSON formatter (M1: keep it simple, the unit's deliverable documents
-what lands in the journal). The manager task logs through the same config.
+what lands in the journal). uvicorn's dictConfig equips only its own
+``uvicorn.*`` loggers, so ``main()`` also installs a root handler
+(``logging.basicConfig``) for the app's own loggers — the manager's state
+transitions and malformed-line counts (``brick_console.*``, INFO) would
+otherwise be dropped: they propagate to an unconfigured root whose
+last-resort handler emits WARNING+ only. Invisible with the stub (it never
+logged); observable the day the real manager was wired.
 
 Exit behavior: SIGINT exits 0. SIGTERM triggers uvicorn's graceful shutdown
 (lifespan cancels the manager task, port released) and then exits 143 —
@@ -43,6 +49,7 @@ opened — systemd's restart backoff handles that without port flapping.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from collections.abc import Callable, Mapping
 from importlib.metadata import PackageNotFoundError
@@ -173,6 +180,13 @@ def main() -> None:
     # depend on brick_console.run staying import-light.
     from brick_console.adapter import PybricksDevTransport
     from brick_console.ble_manager import BLEManager
+
+    # uvicorn's dictConfig equips only its uvicorn.* loggers; the app's own
+    # INFO lines (manager state transitions, malformed-line counts) would
+    # otherwise drop at the unconfigured root (last-resort emits WARNING+).
+    # level=INFO is load-bearing: root defaults to WARNING. The handler
+    # survives uvicorn's config (dictConfig disables no existing loggers).
+    logging.basicConfig(level=logging.INFO)
 
     store = TelemetryStore()
     app = create_app(

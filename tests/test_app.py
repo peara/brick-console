@@ -14,6 +14,8 @@ no async tests are needed here).
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
 from dataclasses import dataclass
 
 import pytest
@@ -422,6 +424,34 @@ def test_run_command_wires_real_manager_and_agent_path(
         assert healthz["status"] == "ok"
         assert healthz["hub"]["state"] == "offline"
         assert client.get("/").status_code == 200
+
+
+def test_main_logging_survives_uvicorn_dictconfig() -> None:
+    # Found wiring the real manager: uvicorn's dictConfig equips only its
+    # uvicorn.* loggers, so the app's own INFO lines — manager state
+    # transitions, malformed-line counts, lifespan start/stop — dropped at
+    # the unconfigured root (the last-resort handler emits WARNING+ only).
+    # Invisible with the stub, which never logged. main() must equip the
+    # root handler itself, and it must survive what uvicorn.run applies
+    # next (dictConfig disables no existing loggers). Subprocess-pinned
+    # because pytest's logging capture equips root handlers in-process,
+    # which would make basicConfig a no-op and mask the regression.
+    code = (
+        "import sys;"
+        "sys.path.insert(0, 'src');"
+        "import brick_console.run as run_mod;"
+        "run_mod.uvicorn.run = lambda app, **kw: None;"
+        "run_mod.main();"
+        "import logging.config;"
+        "from uvicorn.config import LOGGING_CONFIG;"
+        "logging.config.dictConfig(LOGGING_CONFIG);"
+        "logging.getLogger('brick_console.regression').info('MANAGER-LOG-VISIBLE');"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "MANAGER-LOG-VISIBLE" in result.stderr
 
 
 def test_real_manager_parks_and_survives_two_lifespans() -> None:
