@@ -133,56 +133,91 @@ export function nextReconnectDelay(attempt, { baseMs, maxMs } = RECONNECT) {
 }
 
 // ---------------------------------------------------------------------------
-// Port field dictionary (D7): wire key, display unit, and the JSON type
-// the wire allows ("number" | "boolean" | "string" — the same validator
-// tags the server's decoder enforces; a wrong-typed field is dropped, not
-// rendered as "undefined"). The BOOST-era unit trap: ColorDistanceSensor
-// `d` is PERCENT, not mm (D7); Motor `load` is mNm, not a percentage.
-// SYNC NOTE: this mirrors `brick_console.events::_PORT_SPECS` and the D7
-// field dictionary — three copies of one contract. Any field change must
-// land in all three (D7's evolution note: extract to docs/specs/ on the
-// first change). The unit traps are pinned by tests on both sides.
+// Port field dictionary (D7 + D9): wire key, display unit, and the JSON
+// type the wire allows ("number" | "boolean" | "string" — the same
+// validator tags the server's decoder enforces; a wrong-typed field is
+// dropped, not rendered as "undefined"). `tagged` marks the
+// mode-dependent devices (D9): every one of their wire lines carries a
+// "mode" reading-mode tag — the idle agent emits the passive modes
+// ("ambient"/"presence"); programs (M2 opt-in) the active ones
+// ("surface"/"distance"). Single-mode devices keep their spec under
+// "" (a key no wire line can produce for them: their lines carry no
+// tag). The BOOST-era unit trap: ColorDistanceSensor `d` is PERCENT,
+// not mm (D7); Motor `load` is mNm, not a percentage.
+// SYNC NOTE: this mirrors docs/specs/telemetry-wire.md (the canonical
+// dictionary since the first field-dictionary change — D7's evolution
+// note) and `brick_console.events::_PORT_SPECS`. Any field change must
+// land in all three. The unit traps are pinned by tests on both sides.
 const T_NUMBER = "number";
 const T_BOOLEAN = "boolean";
 const T_STRING = "string";
 
 export const PORT_FIELDS = Object.freeze({
-  Motor: [
-    ["angle", "°", T_NUMBER],
-    ["speed", "°/s", T_NUMBER],
-    ["load", "mNm", T_NUMBER],
-  ],
-  ColorSensor: [
-    ["refl", "%", T_NUMBER],
-    ["amb", "%", T_NUMBER],
-    ["h", "°", T_NUMBER],
-    ["s", "%", T_NUMBER],
-    ["v", "%", T_NUMBER],
-    ["col", "", T_STRING],
-  ],
-  ForceSensor: [
-    ["f", "N", T_NUMBER],
-    ["d", "mm", T_NUMBER],
-    ["pressed", "", T_BOOLEAN],
-  ],
-  UltrasonicSensor: [
-    ["d", "mm", T_NUMBER],
-    ["pr", "", T_BOOLEAN],
-  ],
-  ColorDistanceSensor: [
-    ["d", "%", T_NUMBER], // PERCENT — the BOOST-era unit trap, not mm (D7)
-    ["refl", "%", T_NUMBER],
-    ["amb", "%", T_NUMBER],
-    ["h", "°", T_NUMBER],
-    ["s", "%", T_NUMBER],
-    ["v", "%", T_NUMBER],
-    ["col", "", T_STRING],
-  ],
-  TiltSensor: [
-    ["pitch", "°", T_NUMBER],
-    ["roll", "°", T_NUMBER],
-  ],
-  InfraredSensor: [["d", "%", T_NUMBER]],
+  Motor: {
+    tagged: false,
+    modes: {
+      "": [
+        ["angle", "°", T_NUMBER],
+        ["speed", "°/s", T_NUMBER],
+        ["load", "mNm", T_NUMBER],
+      ],
+    },
+  },
+  ColorSensor: {
+    tagged: true,
+    modes: {
+      ambient: [["amb", "%", T_NUMBER]],
+      surface: [
+        ["refl", "%", T_NUMBER],
+        ["h", "°", T_NUMBER],
+        ["s", "%", T_NUMBER],
+        ["v", "%", T_NUMBER],
+        ["col", "", T_STRING],
+      ],
+    },
+  },
+  ForceSensor: {
+    tagged: false,
+    modes: {
+      "": [
+        ["f", "N", T_NUMBER],
+        ["d", "mm", T_NUMBER],
+        ["pressed", "", T_BOOLEAN],
+      ],
+    },
+  },
+  UltrasonicSensor: {
+    tagged: true,
+    modes: {
+      presence: [["pr", "", T_BOOLEAN]],
+      distance: [["d", "mm", T_NUMBER]],
+    },
+  },
+  ColorDistanceSensor: {
+    tagged: true,
+    modes: {
+      ambient: [["amb", "%", T_NUMBER]],
+      // PERCENT — the BOOST-era unit trap, not mm (D7)
+      distance: [["d", "%", T_NUMBER]],
+      surface: [
+        ["refl", "%", T_NUMBER],
+        ["h", "°", T_NUMBER],
+        ["s", "%", T_NUMBER],
+        ["v", "%", T_NUMBER],
+        ["col", "", T_STRING],
+      ],
+    },
+  },
+  TiltSensor: {
+    tagged: false,
+    modes: {
+      "": [
+        ["pitch", "°", T_NUMBER],
+        ["roll", "°", T_NUMBER],
+      ],
+    },
+  },
+  InfraredSensor: { tagged: false, modes: { "": [["d", "%", T_NUMBER]] } },
   // "none" — the empty port — has no rows (not listed; open set).
 });
 
@@ -274,16 +309,23 @@ function typeOk(tag, value) {
 // rows — the glue renders the dev string verbatim and the extra keys are
 // ignored (D7 passthrough policy); "none" likewise yields no rows and the
 // glue dims the chip as an empty port. Wrong-typed fields are dropped,
-// never rendered as "undefined".
+// never rendered as "undefined". Mode resolution mirrors the server's
+// decoder: a mode-dependent device resolves its spec by data.mode; a
+// single-mode device resolves its "" spec only when the line carries no
+// "mode" key (a stray tag makes it an unknown pair — passthrough, no rows).
 export function portRows(data) {
   const device = typeof data?.dev === "string" ? data.dev : "";
-  const spec = PORT_FIELDS[device];
-  if (!spec) return [];
+  const entry = PORT_FIELDS[device];
+  if (!entry) return [];
+  const mode = typeof data?.mode === "string" ? data.mode : "";
+  const spec = entry.modes[mode];
   const rows = [];
-  for (const [key, unit, tag] of spec) {
-    const value = data[key];
-    if (typeOk(tag, value)) {
-      rows.push({ key, text: formatPortValue(device, key, value, unit) });
+  if (spec) {
+    for (const [key, unit, tag] of spec) {
+      const value = data[key];
+      if (typeOk(tag, value)) {
+        rows.push({ key, text: formatPortValue(device, key, value, unit) });
+      }
     }
   }
   return rows;
@@ -369,14 +411,23 @@ function applyTelemetry(dash, data, nowMs) {
       if (letter === null) return dash; // no port letter: nothing to place
       const device = str(data.dev);
       if (device === null) return dash;
-      // All-or-nothing per the D7 dictionary: a known device with a
-      // wrongly-typed field is malformed — skipped whole, like the
-      // server's decoder. Unknown devices ("none" included) have no
-      // required fields and always place.
-      const spec = PORT_FIELDS[device];
-      if (spec) {
-        for (const [key, , tag] of spec) {
-          if (!typeOk(tag, data[key])) return dash;
+      // All-or-nothing per the D7+D9 dictionary, mirroring the server's
+      // decoder exactly: a mode-dependent device without a string "mode"
+      // tag is malformed — skipped whole (the server rejects it before
+      // the wire ever carries it); a known (device, mode) pair with a
+      // wrongly-typed field is malformed — skipped whole; an unknown pair
+      // or unknown device ("none" included) places with no typed rows.
+      const entry = PORT_FIELDS[device];
+      if (entry) {
+        if (entry.tagged) {
+          if (str(data.mode) === null) return dash;
+        }
+        const mode = typeof data.mode === "string" ? data.mode : "";
+        const spec = entry.modes[mode];
+        if (spec) {
+          for (const [key, , tag] of spec) {
+            if (!typeOk(tag, data[key])) return dash;
+          }
         }
       }
       const ports = {

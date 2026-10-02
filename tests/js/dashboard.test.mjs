@@ -131,32 +131,42 @@ test("imu envelope: accel/gyro/up land from wire keys ax..gz/up", () => {
 });
 
 test("port envelope: every D7 device kind renders its dictionary rows", () => {
+  // Tagged devices appear in both regimes (D9): the idle agent's passive
+  // modes (ambient/presence — light off, no ping) and the program-mode
+  // active readings (surface/distance, M2 opt-in). Single-mode devices
+  // carry no tag.
   const cases = [
     [
       { t: "port", p: "A", dev: "Motor", angle: 12, speed: 0, load: 0 },
       ["angle 12 °", "speed 0 °/s", "load 0 mNm"],
     ],
     [
-      {
-        t: "port", p: "B", dev: "ColorSensor",
-        refl: 34, amb: 12, h: 10, s: 80, v: 90, col: "red",
-      },
-      ["refl 34 %", "amb 12 %", "h 10 °", "s 80 %", "v 90 %", "col red"],
+      { t: "port", p: "B", dev: "ColorSensor", mode: "ambient", amb: 12 },
+      ["amb 12 %"],
+    ],
+    [
+      { t: "port", p: "B", dev: "ColorSensor", mode: "surface", refl: 34, h: 10, s: 80, v: 90, col: "red" },
+      ["refl 34 %", "h 10 °", "s 80 %", "v 90 %", "col red"],
     ],
     [
       { t: "port", p: "C", dev: "ForceSensor", f: 0.0, d: 0.0, pressed: false },
       ["f 0 N", "d 0 mm", "pressed false"],
     ],
     [
-      { t: "port", p: "D", dev: "UltrasonicSensor", d: 245, pr: false },
-      ["d 245 mm", "pr false"],
+      { t: "port", p: "D", dev: "UltrasonicSensor", mode: "presence", pr: false },
+      ["pr false"],
     ],
     [
-      {
-        t: "port", p: "E", dev: "ColorDistanceSensor",
-        d: 60, refl: 34, amb: 12, h: 10, s: 80, v: 90, col: "none",
-      },
-      ["d 60 %", "refl 34 %", "amb 12 %", "h 10 °", "s 80 %", "v 90 %", "col none"],
+      { t: "port", p: "D", dev: "UltrasonicSensor", mode: "distance", d: 245 },
+      ["d 245 mm"],
+    ],
+    [
+      { t: "port", p: "E", dev: "ColorDistanceSensor", mode: "ambient", amb: 12 },
+      ["amb 12 %"],
+    ],
+    [
+      { t: "port", p: "E", dev: "ColorDistanceSensor", mode: "distance", d: 60 },
+      ["d 60 %"], // PERCENT — the BOOST-era unit trap (D7)
     ],
     [
       { t: "port", p: "F", dev: "TiltSensor", pitch: 3, roll: -2 },
@@ -164,7 +174,7 @@ test("port envelope: every D7 device kind renders its dictionary rows", () => {
     ],
     [
       { t: "port", p: "A", dev: "InfraredSensor", d: 50 },
-      ["d 50 %"],
+      ["d 50 %"], // program-mode only (D9: an active IR emitter is never the idle agent's)
     ],
   ];
   for (const [data, expected] of cases) {
@@ -184,7 +194,7 @@ test("unit traps: Motor load is mNm, ColorDistanceSensor d is %, UltrasonicSenso
   const motor = portRows({ dev: "Motor", angle: 10, speed: 20, load: 30 });
   assert.deepEqual(motor.map((r) => r.text), ["10 °", "20 °/s", "30 mNm"]);
 
-  const boost = portRows({ dev: "ColorDistanceSensor", d: 55 });
+  const boost = portRows({ dev: "ColorDistanceSensor", mode: "distance", d: 55 });
   assert.deepEqual(boost.map((r) => r.text), ["55 %"]);
 
   assert.equal(formatPortValue("UltrasonicSensor", "d", 2000, "mm"), "no echo");
@@ -210,6 +220,38 @@ test("port envelope: dev:'none' → empty rows; unknown dev string passes throug
   );
   assert.equal(dash.ports.D.device, "SomeFutureSensor");
   assert.deepEqual(dash.ports.D.rows, []);
+});
+
+test("port envelope: mode-dependent device without a tag is skipped whole (D9)", () => {
+  // The server's decoder rejects an untagged ColorSensor line before it
+  // reaches the wire; the client mirrors it — never a partial card.
+  let dash = applyEnvelope(
+    initialDashboard(),
+    telemetryEnvelope({ t: "port", p: "B", dev: "ColorSensor", refl: 34, amb: 12 }),
+    1000,
+  );
+  assert.deepEqual(dash.ports.B, { device: null, rows: [], at: null });
+
+  // A non-string tag is malformed the same way (str() or nothing).
+  dash = applyEnvelope(
+    dash,
+    telemetryEnvelope({ t: "port", p: "D", dev: "UltrasonicSensor", mode: 7, d: 245 }),
+    2000,
+  );
+  assert.deepEqual(dash.ports.D, { device: null, rows: [], at: null });
+});
+
+test("port envelope: unknown (dev, mode) pair passes through with no rows", () => {
+  // Forward compatibility, mirroring the server's decoder: an unknown
+  // pair keeps its tag, places the device, and renders no typed rows —
+  // the raw line stays the record, the dashboard never guesses.
+  let dash = applyEnvelope(
+    initialDashboard(),
+    telemetryEnvelope({ t: "port", p: "B", dev: "ColorSensor", mode: "weird", x: 42 }),
+    1000,
+  );
+  assert.equal(dash.ports.B.device, "ColorSensor");
+  assert.deepEqual(dash.ports.B.rows, []);
 });
 
 test("log envelope: raw line lands in the pane's ring", () => {
@@ -313,7 +355,7 @@ test("mock join sequence (state → hub_info → telemetry) builds the full view
   dash = applyEnvelope(dash, telemetryEnvelope({ t: "port", p: "A", dev: "Motor", angle: 3, speed: 0, load: 0 }), 100);
   dash = applyEnvelope(
     dash,
-    telemetryEnvelope({ t: "port", p: "B", dev: "ColorSensor", refl: 30, amb: 10, h: 1, s: 80, v: 90, col: "red" }),
+    telemetryEnvelope({ t: "port", p: "B", dev: "ColorSensor", mode: "ambient", amb: 10 }),
     100,
   );
   dash = applyEnvelope(dash, telemetryEnvelope({ t: "battery", v: 8085, c: 42, pct: 87 }), 1000);
