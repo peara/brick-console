@@ -17,6 +17,7 @@ Safety lines — never violate (full rules in AGENTS.md):
 2. `@pytest.mark.hub` means "talks to real hardware over BLE". These auto-skip unless `BRICK_CONSOLE_HUB_TESTS=1`.
 3. `uv run pytest` must stay safe to run unattended with the hub off — hardware work stays behind the gate.
 4. All Python goes through `uv`: `uv run pytest`, never bare `pytest` (hook-enforced).
+5. **No BLE scan unless the owner says "go" in this conversation.** "The hub is on", staged tooling, or an earlier scan is not a go. The hub auto-sleeps when unconnected — a surprise scan window burns its awake time and has cost a real session (2026-10-03). When in doubt: report the blocked state and wait.
 
 Commands:
 
@@ -25,4 +26,5 @@ uv run pytest                            # full suite; hub tests auto-skip
 BRICK_CONSOLE_HUB_TESTS=1 uv run pytest  # hardware tests (hub on, desk clear, no motors)
 uv run ruff check .                      # lint
 uv run ruff format --check .             # formatting
+uv run mypy src/                          # type check
 ```
