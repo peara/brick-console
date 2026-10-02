@@ -49,7 +49,7 @@ All Python goes through `uv` (AGENTS.md) — bare `pytest` is denied by the agen
 
 There is no pytest on the hub. Two stages:
 
-1. **Host unit tests** (default suite, no marker): the agent's pure logic must run on the host. Structure `agent/` code so logic modules import cleanly — no hardware I/O at import time — and the thin pybricks-dependent shell stays separate. Where imports can't be avoided, a conftest stub (fake `pybricks.*` modules in `sys.modules`) bridges them.
+1. **Host unit tests** (default suite, no marker): the agent must run on the host. Structure per the library/wrapper split (D9): `brick_telemetry.py` imports cleanly — no hardware I/O at import — and tests import it directly; its module-top `pybricks.*` imports are bridged by the stub package under `tests/stubs/` (conftest puts it, and `agent/`, on `sys.path`). `agent_main.py` owns all policy and deliberately runs `main()` at module top — the on-hub entry shape — so it is not importable in tests; they exec its source with that final call stripped and drive `main()` with stub fakes (loop, cadence, transitions). The D9 actuation ban is executable here: stub call-counting asserts the idle agent never performs an active read (surface color, ultrasonic ping) — the ADR principle as a test.
 2. **On-hub verification:** scripted asserts + observed stdout via `uv run pybricksdev run ble --name "Pybricks Hub" --wait <file>.py` — read the output, compare against expected. Manual/scripted step, not part of pytest.
 
 ## Layout & naming
