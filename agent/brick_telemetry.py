@@ -1,73 +1,80 @@
-"""Hub-side telemetry agent library (issue #15, decisions D7 + D9).
+"""Hub-side telemetry library (issue #15, decisions D7 + D9) — passive
+mechanism only, no policy.
 
-Prints D7-canonical JSON lines on stdout: ``hub_info`` once per start,
-``battery`` about once a second, and ``imu`` plus one line per attached
-device at ~10 Hz. Lines are byte-compatible with the server reference
-(:mod:`brick_console.events`): compact separators, canonical wire key
-order, CRLF added by ``print()`` on the hub.
+This module is what both hub-side programs import: the console's idle
+agent (``agent_main.py``) and, in M2, user programs that opt into
+telemetry (BRD R5). It provides exactly the passive pieces of the D7
+wire contract:
 
-Freshness (D9): same-mode fields are read fresh every cycle; cross-mode
-secondary fields (ColorSensor ``amb``, UltrasonicSensor ``pr``,
-ColorDistanceSensor ``d``/``amb``) re-read every ``SECONDARY_REFRESH``
-cycles with the last value cached between — a PUP mode switch costs
-30-60 ms, and four per cycle would cap the loop at ~4 Hz with the full
-kit attached. Caches seed at attach, so the first line after discovery
-carries measured values.
+- ``battery_pct`` — the pct derivation curve;
+- one builder per telemetry line — byte-exact against the server
+  reference (:mod:`brick_console.events`): compact separators,
+  canonical wire key order, CRLF added by ``print()`` on the hub;
+- the per-port discovery probe.
+
+Per D9 the idle agent is a passive guest: it never illuminates, never
+pings, never reads a sensor's active fields. Concretely, this library
+contains **no active reads** — no ``reflection``/``hsv``/``color`` on a
+color sensor, no ``distance`` on an ultrasonic sensor — and no
+``run()``/loop/cadence: policy belongs to the calling program. The
+InfraredSensor is absent even from the probe ladder: it is an active IR
+emitter (LEGO-documented, 7 kHz pulsed) with no passive mode, so the
+idle agent neither detects nor reads it.
+
+Reading-mode tags (D9): mode-dependent sensor lines carry a ``mode`` key
+asserting which reading the values belong to — ColorSensor
+``"ambient"`` (light off) / ``"surface"`` (light on), UltrasonicSensor
+``"presence"`` (transmitter off) / ``"distance"`` (active ping). The
+publisher asserts the tag because it must: the LUMP driver tracks the
+current mode, but v4.0.1's Python API cannot read it — the one who
+drives the sensor is the only one who can declare what was read. This
+library emits only the passive tags; the surface/distance builders
+arrive with M2 (#36) when programs need them.
 
 Byte-exactness is by construction, not dict luck: MicroPython dicts are
 hash-ordered (no OrderedDict on this firmware), so lines are built by
 string concatenation in the D7 key order; ``json.dumps`` is used only to
-JSON-escape the two free-form strings (hub name, firmware version).
+JSON-escape free-form strings (hub name, firmware version) and to keep
+float repr fidelity on ForceSensor values.
 
-Import-safe: importing performs no hardware I/O — the hub is injected
-(``TelemetryAgent(hub)``); ``run()`` builds the real one. Device
-discovery is a construct-ladder per port (an empty port or a wrong
-device type raises ``OSError(ENODEV)``, the documented probe shape), so
-ports holding devices outside the D7 set emit nothing.
+Import-safe: importing performs no hardware I/O — every builder takes
+the hub/device as an argument; the probe constructs on explicit call.
 """
 
 import json
 
 import pybricks
-from pybricks.hubs import InventorHub
-from pybricks.parameters import Color, Port, Side
+from pybricks.parameters import Port, Side
 from pybricks.pupdevices import (
     ColorDistanceSensor,
     ColorSensor,
     ForceSensor,
-    InfraredSensor,
     Motor,
     TiltSensor,
     UltrasonicSensor,
 )
-from pybricks.tools import StopWatch, wait
 
 __all__ = [
-    "BATTERY_PERIOD",
     "HUB_MODEL",
-    "SECONDARY_REFRESH",
-    "TelemetryAgent",
+    "PORTS",
+    "battery_line",
     "battery_pct",
-    "letter_offset",
-    "run",
+    "color_ambient_line",
+    "color_distance_ambient_line",
+    "force_line",
+    "hub_info_line",
+    "imu_line",
+    "motor_line",
+    "none_line",
+    "port_line",
+    "probe",
+    "tilt_line",
+    "ultrasonic_presence_line",
 ]
 
 HUB_MODEL = "technichub"
-BATTERY_PERIOD = 10
-"""Cycles between battery lines: the cycle runs at ~10 Hz, so every
-10th cycle is ~1 Hz (D7)."""
-SECONDARY_REFRESH = 10
-"""Cycles between cross-mode secondary reads (D9): ~1 s at 10 Hz, the
-same cadence class as battery. Per-port staggered offsets spread the
-mode-switch chains evenly across the window."""
 
-
-def letter_offset(letter):
-    """A=0 .. F=5 — the D9 per-port refresh stagger."""
-    return ord(letter) - 65
-
-
-_PORTS = (
+PORTS = (
     (Port.A, "A"),
     (Port.B, "B"),
     (Port.C, "C"),
@@ -76,6 +83,12 @@ _PORTS = (
     (Port.F, "F"),
 )
 
+# Discovery ladder (the documented probe shape): constructing a device
+# class on an empty port or a port holding a different device type
+# raises OSError(ENODEV), so first constructor wins. InfraredSensor is
+# deliberately absent — an active IR emitter with no passive mode is
+# not the idle agent's business (D9); programs that own one (M2) may
+# still publish its single-mode `d` under the wire dictionary.
 _CLASSES = (
     (Motor, "Motor"),
     (ColorSensor, "ColorSensor"),
@@ -83,7 +96,6 @@ _CLASSES = (
     (ForceSensor, "ForceSensor"),
     (ColorDistanceSensor, "ColorDistanceSensor"),
     (TiltSensor, "TiltSensor"),
-    (InfraredSensor, "InfraredSensor"),
 )
 
 _SIDE_NAMES = {
@@ -93,22 +105,6 @@ _SIDE_NAMES = {
     Side.RIGHT: "right",
     Side.FRONT: "front",
     Side.BACK: "back",
-}
-
-_COLOR_NAMES = {
-    Color.RED: "red",
-    Color.BROWN: "brown",
-    Color.ORANGE: "orange",
-    Color.YELLOW: "yellow",
-    Color.GREEN: "green",
-    Color.CYAN: "cyan",
-    Color.BLUE: "blue",
-    Color.MAGENTA: "magenta",
-    Color.VIOLET: "violet",
-    Color.BLACK: "black",
-    Color.GRAY: "gray",
-    Color.WHITE: "white",
-    Color.NONE: "none",
 }
 
 # 2S Li-ion discharge approximation (D7): piecewise-linear mV -> %,
@@ -145,204 +141,96 @@ def battery_pct(voltage_mv):
     return low_pct + (high_pct - low_pct) * (voltage_mv - low_mv) // (high_mv - low_mv)
 
 
-class _Reader:
-    """Per-device field reader (D9): primary fields fresh every cycle
-    (same-mode reads, 0 ms), secondary fields re-read every
-    ``SECONDARY_REFRESH`` cycles with the last value cached between.
-    The cache seeds at attach (the one-time mode chain is paid inside
-    discovery's blocking construct), so the first line after discovery
-    carries genuinely measured secondaries — never placeholder zeros.
+def probe(port):
+    """Identify the device on ``port`` — ``(dev name, device)`` or ``None``.
+
+    The typed construct-ladder: the ColorSensor constructor's own
+    blocking RGB_I read blips its light once (~60 ms, the one
+    attach-time actuation — identification, not telemetry; D9); the
+    other constructors are verified clean.
     """
-
-    def __init__(self, dev):
-        self.dev = dev
-        self.amb = dev.ambient()
-
-    def read(self, cycle):
-        hsv = self.dev.hsv()
-        col = _COLOR_NAMES.get(self.dev.color(), "none")
-        return f'"refl":{self.dev.reflection()},"amb":{self.amb},"h":{hsv.h},"s":{hsv.s},"v":{hsv.v},"col":"{col}"'
-
-    def refresh(self):
-        # Secondaries first: the cycle ends on the primary mode, so
-        # non-refresh cycles pay zero mode switches.
-        self.amb = self.dev.ambient()
-        self.dev.reflection()
+    for cls, name in _CLASSES:
+        try:
+            return name, cls(port)
+        except OSError:
+            continue
+    return None
 
 
-class _ColorReader(_Reader):
-    pass
+def hub_info_line(hub):
+    """The session snapshot line (D7): name, firmware, model literal."""
+    info = hub.system.info()
+    name = json.dumps(info["name"])
+    fw = json.dumps(pybricks.version[1])
+    return f'{{"t":"hub_info","name":{name},"fw":{fw},"model":"{HUB_MODEL}"}}'
 
 
-class _UltrasonicReader(_Reader):
-    def __init__(self, dev):
-        self.dev = dev
-        self.pr = dev.presence()
-
-    def read(self, cycle):
-        pr = "true" if self.pr else "false"
-        return f'"d":{self.dev.distance()},"pr":{pr}'
-
-    def refresh(self):
-        self.pr = self.dev.presence()
-        self.dev.distance()
+def battery_line(hub):
+    """The ~1 Hz battery line: v mV, c mA, pct derived via battery_pct."""
+    voltage_mv = hub.battery.voltage()
+    current_ma = hub.battery.current()
+    pct = battery_pct(voltage_mv)
+    return f'{{"t":"battery","v":{voltage_mv},"c":{current_ma},"pct":{pct}}}'
 
 
-class _ForceReader(_Reader):
-    def __init__(self, dev):
-        self.dev = dev
-
-    def read(self, cycle):
-        f = json.dumps(self.dev.force())
-        d = json.dumps(self.dev.distance())
-        pressed = "true" if self.dev.pressed() else "false"
-        return f'"f":{f},"d":{d},"pressed":{pressed}'
-
-    def refresh(self):
-        pass
-
-
-class _ColorDistanceReader(_Reader):
-    def __init__(self, dev):
-        self.dev = dev
-        self.d = dev.distance()
-        self.amb = dev.ambient()
-
-    def read(self, cycle):
-        hsv = self.dev.hsv()
-        col = _COLOR_NAMES.get(self.dev.color(), "none")
-        return f'"d":{self.d},"refl":{self.dev.reflection()},"amb":{self.amb},"h":{hsv.h},"s":{hsv.s},"v":{hsv.v},"col":"{col}"'
-
-    def refresh(self):
-        self.d = self.dev.distance()
-        self.amb = self.dev.ambient()
-        self.dev.reflection()
-
-
-class _TiltReader(_Reader):
-    def __init__(self, dev):
-        self.dev = dev
-
-    def read(self, cycle):
-        pitch, roll = self.dev.tilt()
-        return f'"pitch":{pitch},"roll":{roll}'
-
-    def refresh(self):
-        pass
-
-
-class _InfraredReader(_Reader):
-    def __init__(self, dev):
-        self.dev = dev
-
-    def read(self, cycle):
-        return f'"d":{self.dev.distance()}'
-
-    def refresh(self):
-        pass
-
-
-class _MotorReader(_Reader):
-    def __init__(self, dev):
-        self.dev = dev
-
-    def read(self, cycle):
-        return f'"angle":{self.dev.angle()},"speed":{self.dev.speed()},"load":{self.dev.load()}'
-
-    def refresh(self):
-        pass
-
-
-_READERS = {
-    "Motor": _MotorReader,
-    "ColorSensor": _ColorReader,
-    "UltrasonicSensor": _UltrasonicReader,
-    "ForceSensor": _ForceReader,
-    "ColorDistanceSensor": _ColorDistanceReader,
-    "TiltSensor": _TiltReader,
-    "InfraredSensor": _InfraredReader,
-}
-
-
-def _imu_line(hub):
+def imu_line(hub):
+    """The ~10 Hz IMU line: accel mm/s², gyro °/s, up side string."""
     ax, ay, az = hub.imu.acceleration()
     gx, gy, gz = hub.imu.angular_velocity()
     up = _SIDE_NAMES[hub.imu.up()]
     return f'{{"t":"imu","ax":{int(ax)},"ay":{int(ay)},"az":{int(az)},"gx":{int(gx)},"gy":{int(gy)},"gz":{int(gz)},"up":"{up}"}}'
 
 
-class TelemetryAgent:
-    """Collects and prints telemetry lines for one hub session."""
-
-    def __init__(self, hub, out=print):
-        self._hub = hub
-        self._out = out
-        self._cycle = 0
-        self._devices = {}
-        self._last_dev = {}
-
-    def start(self):
-        """Emit the ``hub_info`` snapshot (once per session, D7)."""
-        info = self._hub.system.info()
-        name = json.dumps(info["name"])
-        fw = json.dumps(pybricks.version[1])
-        self._out(f'{{"t":"hub_info","name":{name},"fw":{fw},"model":"{HUB_MODEL}"}}')
-
-    def cycle(self):
-        """One ~10 Hz tick: battery (every Nth), imu, one line per port."""
-        if self._cycle % BATTERY_PERIOD == 0:
-            voltage_mv = self._hub.battery.voltage()
-            current_ma = self._hub.battery.current()
-            pct = battery_pct(voltage_mv)
-            self._out(
-                f'{{"t":"battery","v":{voltage_mv},"c":{current_ma},"pct":{pct}}}'
-            )
-        self._out(_imu_line(self._hub))
-        for port, letter in _PORTS:
-            self._port_cycle(port, letter)
-        self._cycle += 1
-
-    def _port_cycle(self, port, letter):
-        reader = self._devices.get(port)
-        if reader is None:
-            self._probe(port)
-            reader = self._devices.get(port)
-        if reader is None:
-            return
-        try:
-            if self._cycle % SECONDARY_REFRESH == letter_offset(letter):
-                reader.refresh()
-            fields = reader.read(self._cycle)
-        except OSError:
-            # Detach transition (D7): the only time "none" goes on the
-            # wire. The failed reader is dropped; later cycles re-probe
-            # the empty port and stay silent (constructing on an empty
-            # port raises immediately), so "none" prints once.
-            del self._devices[port]
-            if self._last_dev.get(port) != "none":
-                self._last_dev[port] = "none"
-                self._out(f'{{"t":"port","p":"{letter}","dev":"none"}}')
-            return
-        self._last_dev[port] = reader.name
-        self._out(f'{{"t":"port","p":"{letter}","dev":"{reader.name}",{fields}}}')
-
-    def _probe(self, port):
-        for cls, name in _CLASSES:
-            try:
-                dev = cls(port)
-            except OSError:
-                continue
-            reader = _READERS[name](dev)
-            reader.name = name
-            self._devices[port] = reader
-            return
+def motor_line(letter, dev):
+    """Motor port line — single mode, no reading-mode tag (all passive)."""
+    return f'{{"t":"port","p":"{letter}","dev":"Motor","angle":{dev.angle()},"speed":{dev.speed()},"load":{dev.load()}}}'
 
 
-def run():
-    """Loop forever at ~10 Hz (the wrapper's entry point)."""
-    agent = TelemetryAgent(InventorHub(), out=print)
-    agent.start()
-    watch = StopWatch()
-    while True:
-        agent.cycle()
-        wait(100 - watch.time() % 100)
+def color_ambient_line(letter, dev):
+    """ColorSensor resting reading (D9): light off, ambient only."""
+    return f'{{"t":"port","p":"{letter}","dev":"ColorSensor","mode":"ambient","amb":{dev.ambient()}}}'
+
+
+def ultrasonic_presence_line(letter, dev):
+    """UltrasonicSensor resting reading (D9): transmitter off, listen only."""
+    pr = "true" if dev.presence() else "false"
+    return f'{{"t":"port","p":"{letter}","dev":"UltrasonicSensor","mode":"presence","pr":{pr}}}'
+
+
+def force_line(letter, dev):
+    """ForceSensor port line — single mode, no tag; floats keep repr fidelity."""
+    f = json.dumps(dev.force())
+    d = json.dumps(dev.distance())
+    pressed = "true" if dev.pressed() else "false"
+    return f'{{"t":"port","p":"{letter}","dev":"ForceSensor","f":{f},"d":{d},"pressed":{pressed}}}'
+
+
+def tilt_line(letter, dev):
+    """TiltSensor port line — single mode, no tag."""
+    pitch, roll = dev.tilt()
+    return f'{{"t":"port","p":"{letter}","dev":"TiltSensor","pitch":{pitch},"roll":{roll}}}'
+
+
+def color_distance_ambient_line(letter, dev):
+    """ColorDistanceSensor resting reading (D9): ambient only."""
+    return f'{{"t":"port","p":"{letter}","dev":"ColorDistanceSensor","mode":"ambient","amb":{dev.ambient()}}}'
+
+
+def none_line(letter):
+    """The detach-transition line (D7): emitted only on attach → detach."""
+    return f'{{"t":"port","p":"{letter}","dev":"none"}}'
+
+
+_LINES = {
+    "Motor": motor_line,
+    "ColorSensor": color_ambient_line,
+    "UltrasonicSensor": ultrasonic_presence_line,
+    "ForceSensor": force_line,
+    "ColorDistanceSensor": color_distance_ambient_line,
+    "TiltSensor": tilt_line,
+}
+
+
+def port_line(dev_name, letter, dev):
+    """Dispatch to the passive line builder for a discovered device."""
+    return _LINES[dev_name](letter, dev)

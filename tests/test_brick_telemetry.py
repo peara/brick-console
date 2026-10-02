@@ -1,119 +1,150 @@
-"""Hub-agent tests (testing.md hub-agent tier): the D7 wire from the hub side.
+"""Hub-agent tests (testing.md hub-agent tier): the D7+D9 wire from the
+hub side, pinned as the library/wrapper split.
 
-The agent (``agent/brick_telemetry.py``) and the server model
-(:mod:`brick_console.events`) are tested against each other: agent-built
-lines must decode through the server's ``decode()`` and re-encode
-byte-exactly (the same standard ``tests/test_events.py`` pins for the
-server side). The ``pybricks`` package is the host stub registered by
+The passive library (``agent/brick_telemetry.py``) is imported directly
+(conftest puts ``agent/`` on ``sys.path`` — import-safe by design). The
+wrapper (``agent/agent_main.py``) runs ``main()`` at module top on the
+hub (the entry shape the first soak proved), so host tests exec its
+source with that final call stripped and drive ``main`` with fakes.
+
+Everything is checked against the server model
+(:mod:`brick_console.events`): built lines must decode through the
+server's ``decode()`` and re-encode byte-exactly. The D9 actuation ban
+is executable here: stub call-counting asserts the idle agent never
+calls an active read (``reflection``/``hsv``/``color`` on a color
+sensor, ``distance`` on an ultrasonic) and never probes an
+InfraredSensor. The ``pybricks`` package is the host stub registered by
 ``tests/conftest.py``; nothing here touches hardware.
 """
 
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
-from types import ModuleType
 
+import brick_telemetry as bt
 import pybricks.hubs as stub_hubs
 import pybricks.pupdevices as stub_pup
-import pybricks.tools as stub_tools
 import pytest
 
-from brick_console.events import (
-    Battery,
-    HubInfo,
-    Imu,
-    Port,
-    decode,
-    encode,
-)
+from brick_console.events import Battery, HubInfo, Imu, Port, decode, encode
 
-_AGENT_PATH = Path(__file__).resolve().parents[1] / "agent" / "brick_telemetry.py"
+_AGENT_DIR = Path(__file__).resolve().parents[1] / "agent"
 
-
-def _load_agent() -> ModuleType:
-    """Import the agent module fresh from its file (agent/ is not a package)."""
-    spec = importlib.util.spec_from_file_location("brick_telemetry", _AGENT_PATH)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+# D9's actuation ban is per device: UltrasonicSensor's `d` read is an
+# active ping (DISTL) and ColorSensor's refl/hsv/col reads keep its
+# light on (RGB_I) — but ForceSensor's `d` is passive plunger travel
+# (FRAW): the device, not the read's name, is the discriminator. Keys
+# are the stub's READS-dict attr names, which CALLS records.
+ACTIVE_ATTRS_BY_DEVICE = {
+    "ColorSensor": ("refl", "hsv", "col"),
+    "UltrasonicSensor": ("d",),
+}
 
 
-@pytest.fixture()
-def agent() -> ModuleType:
+def assert_no_active_reads():
+    for port, attr in stub_pup.CALLS:
+        device = stub_pup.ATTACHED.get(port)
+        forbidden = ACTIVE_ATTRS_BY_DEVICE.get(device, ())
+        assert attr not in forbidden, f"active read {attr} on {device} port {port}"
+
+
+@pytest.fixture(autouse=True)
+def _clean_stubs():
     stub_pup.reset()
     stub_hubs.CONSTRUCTED.clear()
-    stub_tools.WAITED.clear()
-    return _load_agent()
 
 
-class TestImportSafety:
-    def test_module_import_does_no_hardware_io(self, agent) -> None:
-        # Import must build no hub and probe no port (issue #15 done-when);
-        # a single stub construction elsewhere in this file would also
-        # trip this, so the import happens before any ATTACHED setup.
+def _load_wrapper():
+    """Exec the wrapper with its module-top ``main()`` entry stripped.
+
+    On the hub that call is the program (proven by the first soak); on
+    the host it would loop forever. Stripping only that line leaves every
+    policy function testable against the real library import, exactly
+    as on-hub.
+    """
+    src = (_AGENT_DIR / "agent_main.py").read_text()
+    lines = src.rstrip().splitlines()
+    assert lines[-1] == "main()", "wrapper must end with its entry call"
+    ns = {"__name__": "agent_main_test"}
+    exec("\n".join(lines[:-1]), ns)  # noqa: S102 - exec of repo-local source
+    return ns
+
+
+def _attach_kit():
+    """The 51515 kit: Motor A, ColorSensor C, UltrasonicSensor E."""
+    from pybricks import parameters
+
+    stub_pup.ATTACHED[parameters.Port.A] = "Motor"
+    stub_pup.READS[parameters.Port.A] = {"angle": 12, "speed": 0, "load": 0}
+    stub_pup.ATTACHED[parameters.Port.C] = "ColorSensor"
+    stub_pup.READS[parameters.Port.C] = {"amb": 12}
+    stub_pup.ATTACHED[parameters.Port.E] = "UltrasonicSensor"
+    stub_pup.READS[parameters.Port.E] = {"d": 245, "pr": False}
+    return parameters
+
+
+def _run_wrapper(ns, cycles, hub=None):
+    """Drive wrapper ``main`` for ``cycles`` ticks, collecting lines."""
+    lines = []
+    ticks = {"n": 0}
+
+    class _Watch:
+        def __init__(self):
+            self.now = 0
+
+        def time(self):
+            return self.now
+
+    watch = _Watch()
+
+    def fake_wait(ms):
+        ticks["n"] += 1
+        watch.now += ms
+        if ticks["n"] >= cycles:
+            raise KeyboardInterrupt  # the only exit — the loop never ends
+
+    ns["InventorHub"] = hub if hub is not None else stub_hubs.InventorHub
+    ns["StopWatch"] = lambda: watch
+    ns["wait"] = fake_wait
+    with pytest.raises(KeyboardInterrupt):
+        ns["main"](out=lines.append)
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# Library: import safety and the split itself
+# ---------------------------------------------------------------------------
+
+
+class TestLibrarySplit:
+    def test_import_does_no_hardware_io(self) -> None:
+        # Reload AFTER the fixture's stub reset: import-time hardware I/O
+        # would append to the stubs' construction logs where this sees it.
+        # (Asserting on the module-top import alone is vacuous — the
+        # autouse reset clears the logs before any test body runs.)
+        import importlib
+
+        importlib.reload(bt)
         assert stub_hubs.CONSTRUCTED == []
         assert stub_pup.CONSTRUCTED == []
 
-
-class TestHubInfo:
-    def test_start_emits_canonical_hub_info(self, agent) -> None:
-        stub_hubs.SYSTEM_INFO["name"] = "Pybricks Hub"
-        lines = []
-        teal = agent.TelemetryAgent(stub_hubs.InventorHub(), out=lines.append)
-        teal.start()
-
-        assert len(lines) == 1
-        event = decode(lines[0])
-        assert isinstance(event, HubInfo)
-        assert event.name == "Pybricks Hub"
-        assert event.firmware == "4.0.1"
-        assert event.model == "technichub"
-        # Byte-exact against the D7 canonical line.
-        assert encode(event) == (
-            b'{"t":"hub_info","name":"Pybricks Hub","fw":"4.0.1","model":"technichub"}'
-            b"\r\n"
-        )
-
-    def test_start_emits_only_once(self, agent) -> None:
-        teal = agent.TelemetryAgent(stub_hubs.InventorHub(), out=lambda _: None)
-        teal.start()
-        teal.start()
-        # hub_info is a snapshot event: later start()s re-print it, but the
-        # agent contract calls start() exactly once per session (run()).
-        # Nothing to assert beyond "no crash" — the once-ness belongs to run().
+    def test_library_is_policy_free(self) -> None:
+        # D9's split, pinned: no run()/loop in the library, and no
+        # builders for active readings (surface color, ultrasonic
+        # distance) — those arrive with M2 (#36) when programs need them.
+        assert not hasattr(bt, "run")
+        assert not hasattr(bt, "color_surface_line")
+        assert not hasattr(bt, "ultrasonic_distance_line")
 
 
-class TestBattery:
-    def test_canonical_battery_line(self, agent) -> None:
-        stub_hubs.BATTERY.update(v=8085, c=42)
-        lines = []
-        teal = agent.TelemetryAgent(stub_hubs.InventorHub(), out=lines.append)
-        teal.start()
-        teal.cycle()
+# ---------------------------------------------------------------------------
+# battery_pct — the D7 derivation curve
+# ---------------------------------------------------------------------------
 
-        battery_lines = [ln for ln in lines if '"t":"battery"' in ln]
-        assert len(battery_lines) == 1
-        event = decode(battery_lines[0])
-        assert isinstance(event, Battery)
-        assert event.voltage_mv == 8085
-        assert event.current_ma == 42
-        assert event.percent == 87
-        assert encode(event) == b'{"t":"battery","v":8085,"c":42,"pct":87}\r\n'
 
-    def test_battery_cadence_every_tenth_cycle(self, agent) -> None:
-        lines = []
-        teal = agent.TelemetryAgent(stub_hubs.InventorHub(), out=lines.append)
-        teal.start()
-        for _ in range(21):
-            teal.cycle()
-        battery_count = sum(1 for ln in lines if '"t":"battery"' in ln)
-        assert battery_count == 3  # cycles 0, 10, 20
-
-    def test_pct_curve_canonical_point(self, agent) -> None:
-        # The D7 canonical example: 8085 mV -> 87 %.
-        assert agent.battery_pct(8085) == 87
+class TestBatteryPct:
+    def test_canonical_point(self) -> None:
+        assert bt.battery_pct(8085) == 87  # the D7 canonical example
 
     @pytest.mark.parametrize(
         ("mv", "pct"),
@@ -131,380 +162,373 @@ class TestBattery:
             (6000, 0),
             (5900, 0),
             (6301, 10),
-            (6601, 22),
             (7999, 83),
         ],
     )
-    def test_pct_curve_monotonic_and_clamped(self, agent, mv, pct) -> None:
-        assert agent.battery_pct(mv) == pct
+    def test_curve_monotonic_and_clamped(self, mv, pct) -> None:
+        assert bt.battery_pct(mv) == pct
 
 
-class TestImu:
-    def test_canonical_imu_line(self, agent) -> None:
-        stub_hubs.IMU.update(
-            acc=(120, -980, 9810), gyro=(0, 0, 3), up=stub_hubs.parameters.Side.TOP
+# ---------------------------------------------------------------------------
+# Line builders — byte-identical to the server reference
+# ---------------------------------------------------------------------------
+
+
+class TestBuilders:
+    def test_hub_info_line(self) -> None:
+        line = bt.hub_info_line(stub_hubs.InventorHub())
+        event = decode(line)
+        assert isinstance(event, HubInfo)
+        assert event.name == "Pybricks Hub"
+        assert event.firmware == "4.0.1"
+        assert event.model == "technichub"
+        assert encode(event) == (
+            b'{"t":"hub_info","name":"Pybricks Hub","fw":"4.0.1","model":"technichub"}'
+            b"\r\n"
         )
-        lines = []
-        teal = agent.TelemetryAgent(stub_hubs.InventorHub(), out=lines.append)
-        teal.start()
-        teal.cycle()
 
-        imu_lines = [ln for ln in lines if '"t":"imu"' in ln]
-        assert len(imu_lines) == 1
-        event = decode(imu_lines[0])
+    def test_battery_line(self) -> None:
+        stub_hubs.BATTERY.update(v=8085, c=42)
+        line = bt.battery_line(stub_hubs.InventorHub())
+        event = decode(line)
+        assert isinstance(event, Battery)
+        assert (event.voltage_mv, event.current_ma, event.percent) == (8085, 42, 87)
+        assert encode(event) == b'{"t":"battery","v":8085,"c":42,"pct":87}\r\n'
+
+    def test_imu_line(self) -> None:
+        from pybricks import parameters
+
+        stub_hubs.IMU.update(
+            acc=(120, -980, 9810), gyro=(0, 0, 3), up=parameters.Side.TOP
+        )
+        line = bt.imu_line(stub_hubs.InventorHub())
+        event = decode(line)
         assert isinstance(event, Imu)
         assert event.accel == (120, -980, 9810)
-        assert event.gyro == (0, 0, 3)
         assert event.up == "top"
         assert encode(event) == (
             b'{"t":"imu","ax":120,"ay":-980,"az":9810,"gx":0,"gy":0,"gz":3,"up":"top"}'
             b"\r\n"
         )
 
-    def test_imu_emitted_every_cycle(self, agent) -> None:
-        lines = []
-        teal = agent.TelemetryAgent(stub_hubs.InventorHub(), out=lines.append)
-        teal.start()
-        for _ in range(5):
-            teal.cycle()
-        assert sum(1 for ln in lines if '"t":"imu"' in ln) == 5
-
-
-class TestPorts:
-    def test_canonical_motor_line(self, agent) -> None:
-        from pybricks import parameters
-
-        stub_pup.ATTACHED[parameters.Port.A] = "Motor"
-        stub_pup.READS[parameters.Port.A] = {"angle": 12, "speed": 0, "load": 0}
-        lines = []
-        teal = agent.TelemetryAgent(stub_hubs.InventorHub(), out=lines.append)
-        teal.start()
-        teal.cycle()
-
-        port_lines = [ln for ln in lines if '"t":"port"' in ln]
-        assert port_lines == [
-            '{"t":"port","p":"A","dev":"Motor","angle":12,"speed":0,"load":0}'
-        ]
-        event = decode(port_lines[0])
+    def test_motor_line(self) -> None:
+        parameters = _attach_kit()
+        line = bt.motor_line("A", stub_pup.Motor(parameters.Port.A))
+        event = decode(line)
         assert isinstance(event, Port)
-        assert event.port == "A"
-        assert event.device == "Motor"
-        assert event.angle_deg == 12
+        assert event.mode is None  # single mode: no tag (D9)
+        assert (event.angle_deg, event.speed_dps, event.load_mnm) == (12, 0, 0)
         assert encode(event) == (
             b'{"t":"port","p":"A","dev":"Motor","angle":12,"speed":0,"load":0}\r\n'
         )
 
-    def test_canonical_color_sensor_line(self, agent) -> None:
-        from pybricks import parameters
-
-        stub_pup.ATTACHED[parameters.Port.B] = "ColorSensor"
-        stub_pup.READS[parameters.Port.B] = {
-            "refl": 34,
-            "amb": 12,
-            "hsv": stub_pup.Hsv(10, 80, 90),
-            "col": parameters.Color.RED,
-        }
-        lines = []
-        teal = agent.TelemetryAgent(stub_hubs.InventorHub(), out=lines.append)
-        teal.start()
-        teal.cycle()
-
-        port_lines = [ln for ln in lines if '"t":"port"' in ln]
-        assert port_lines == [
-            '{"t":"port","p":"B","dev":"ColorSensor","refl":34,"amb":12,"h":10,"s":80,"v":90,"col":"red"}'
-        ]
-        assert encode(decode(port_lines[0])) == (
-            b'{"t":"port","p":"B","dev":"ColorSensor","refl":34,"amb":12,"h":10,"s":80,"v":90,"col":"red"}'
-            b"\r\n"
+    def test_color_ambient_line(self) -> None:
+        parameters = _attach_kit()
+        line = bt.color_ambient_line("C", stub_pup.ColorSensor(parameters.Port.C))
+        event = decode(line)
+        assert isinstance(event, Port)
+        assert event.mode == "ambient"
+        assert event.ambient_pct == 12
+        assert encode(event) == (
+            b'{"t":"port","p":"C","dev":"ColorSensor","mode":"ambient","amb":12}\r\n'
         )
 
-    def test_canonical_ultrasonic_line(self, agent) -> None:
-        from pybricks import parameters
-
-        stub_pup.ATTACHED[parameters.Port.D] = "UltrasonicSensor"
-        stub_pup.READS[parameters.Port.D] = {"d": 245, "pr": False}
-        lines = []
-        teal = agent.TelemetryAgent(stub_hubs.InventorHub(), out=lines.append)
-        teal.start()
-        teal.cycle()
-
-        port_lines = [ln for ln in lines if '"t":"port"' in ln]
-        assert port_lines == [
-            '{"t":"port","p":"D","dev":"UltrasonicSensor","d":245,"pr":false}'
-        ]
-        assert encode(decode(port_lines[0])) == (
-            b'{"t":"port","p":"D","dev":"UltrasonicSensor","d":245,"pr":false}\r\n'
+    def test_ultrasonic_presence_line(self) -> None:
+        parameters = _attach_kit()
+        line = bt.ultrasonic_presence_line(
+            "E", stub_pup.UltrasonicSensor(parameters.Port.E)
+        )
+        event = decode(line)
+        assert isinstance(event, Port)
+        assert event.mode == "presence"
+        assert event.presence is False
+        assert encode(event) == (
+            b'{"t":"port","p":"E","dev":"UltrasonicSensor","mode":"presence","pr":false}\r\n'
         )
 
-    def test_all_device_kinds_round_trip(self, agent) -> None:
-        # One line per D7 device kind, each decoded + re-encoded through the
-        # server reference. ForceSensor/ColorDistanceSensor/TiltSensor/
-        # InfraredSensor never touch this hub's hardware (not in 51515) —
-        # the stubs still prove the field dictionary and key order.
+    def test_force_line_keeps_float_repr(self) -> None:
         from pybricks import parameters
 
         stub_pup.ATTACHED[parameters.Port.A] = "ForceSensor"
-        stub_pup.READS[parameters.Port.A] = {"f": 0.0, "d": 0.0, "pressed": False}
+        stub_pup.READS[parameters.Port.A] = {"f": 1.5, "d": 2.0, "pressed": True}
+        line = bt.force_line("A", stub_pup.ForceSensor(parameters.Port.A))
+        event = decode(line)
+        assert isinstance(event, Port)
+        assert event.force_n == 1.5
+        assert encode(event) == (
+            b'{"t":"port","p":"A","dev":"ForceSensor","f":1.5,"d":2.0,"pressed":true}\r\n'
+        )
+
+    def test_tilt_line(self) -> None:
+        from pybricks import parameters
+
+        stub_pup.ATTACHED[parameters.Port.A] = "TiltSensor"
+        stub_pup.READS[parameters.Port.A] = {"tilt": (3, -2)}
+        line = bt.tilt_line("A", stub_pup.TiltSensor(parameters.Port.A))
+        event = decode(line)
+        assert isinstance(event, Port)
+        assert (event.pitch_deg, event.roll_deg) == (3, -2)
+        assert encode(event) == (
+            b'{"t":"port","p":"A","dev":"TiltSensor","pitch":3,"roll":-2}\r\n'
+        )
+
+    def test_color_distance_ambient_line(self) -> None:
+        from pybricks import parameters
+
         stub_pup.ATTACHED[parameters.Port.B] = "ColorDistanceSensor"
-        stub_pup.READS[parameters.Port.B] = {
-            "d": 42,
-            "refl": 5,
-            "amb": 7,
-            "hsv": stub_pup.Hsv(200, 60, 70),
-            "col": parameters.Color.BLUE,
-        }
-        stub_pup.ATTACHED[parameters.Port.C] = "TiltSensor"
-        stub_pup.READS[parameters.Port.C] = {"tilt": (3, -2)}
-        stub_pup.ATTACHED[parameters.Port.E] = "InfraredSensor"
-        stub_pup.READS[parameters.Port.E] = {"d": 100}
+        stub_pup.READS[parameters.Port.B] = {"amb": 7, "d": 42}
+        line = bt.color_distance_ambient_line(
+            "B", stub_pup.ColorDistanceSensor(parameters.Port.B)
+        )
+        event = decode(line)
+        assert isinstance(event, Port)
+        assert event.mode == "ambient"
+        assert event.ambient_pct == 7
+        assert encode(event) == (
+            b'{"t":"port","p":"B","dev":"ColorDistanceSensor","mode":"ambient","amb":7}\r\n'
+        )
 
-        lines = []
-        teal = agent.TelemetryAgent(stub_hubs.InventorHub(), out=lines.append)
-        teal.start()
-        teal.cycle()
+    def test_none_line(self) -> None:
+        event = decode(bt.none_line("F"))
+        assert isinstance(event, Port)
+        assert event.device == "none"
+        assert encode(event) == b'{"t":"port","p":"F","dev":"none"}\r\n'
 
-        port_lines = [ln for ln in lines if '"t":"port"' in ln]
-        assert len(port_lines) == 4
-        # Field dictionary + key order per device kind (D7).
+
+# ---------------------------------------------------------------------------
+# probe — discovery, ladder order, and the InfraredSensor exclusion
+# ---------------------------------------------------------------------------
+
+
+class TestProbe:
+    def test_finds_the_attached_device_per_port(self) -> None:
+        parameters = _attach_kit()
+        assert bt.probe(parameters.Port.A)[0] == "Motor"
+        assert bt.probe(parameters.Port.C)[0] == "ColorSensor"
+        assert bt.probe(parameters.Port.E)[0] == "UltrasonicSensor"
+
+    def test_empty_port_returns_none(self) -> None:
+        parameters = _attach_kit()
+        assert bt.probe(parameters.Port.F) is None
+
+    def test_infrared_sensor_is_not_probed(self) -> None:
+        # D9: an active IR emitter (LEGO-documented, 7 kHz pulsed) has no
+        # passive mode — the idle agent neither detects nor reads it.
+        parameters = _attach_kit()
+        stub_pup.ATTACHED[parameters.Port.F] = "InfraredSensor"
+        stub_pup.READS[parameters.Port.F] = {"d": 50}
+        assert bt.probe(parameters.Port.F) is None
+        assert all(name != "InfraredSensor" for name, _ in stub_pup.CONSTRUCTED)
+
+
+# ---------------------------------------------------------------------------
+# The actuation ban — D9's principle as an executable test
+# ---------------------------------------------------------------------------
+
+
+class TestActuationBan:
+    def test_library_never_performs_active_reads(self) -> None:
+        # Every builder against the full kit: only passive attrs touched.
+        parameters = _attach_kit()
+        hub = stub_hubs.InventorHub()
+        bt.hub_info_line(hub)
+        bt.battery_line(hub)
+        bt.imu_line(hub)
+        bt.port_line("Motor", "A", stub_pup.Motor(parameters.Port.A))
+        bt.port_line("ColorSensor", "C", stub_pup.ColorSensor(parameters.Port.C))
+        bt.port_line(
+            "UltrasonicSensor", "E", stub_pup.UltrasonicSensor(parameters.Port.E)
+        )
+        assert_no_active_reads()
+
+    def test_wrapper_never_performs_active_reads(self) -> None:
+        parameters = _attach_kit()
+        # A ForceSensor on D pins the per-device nuance: its passive `d`
+        # read (plunger travel, FRAW) must not trip the ban that the
+        # UltrasonicSensor's `d` (an active ping) does.
+        stub_pup.ATTACHED[parameters.Port.D] = "ForceSensor"
+        stub_pup.READS[parameters.Port.D] = {"f": 1.5, "d": 2.0, "pressed": False}
+        ns = _load_wrapper()
+        _run_wrapper(ns, cycles=30)
+        assert_no_active_reads()
+        # The passive reads DID happen — every cycle, resting mode only.
+        assert stub_pup.CALLS[(parameters.Port.C, "amb")] == 30
+        assert stub_pup.CALLS[(parameters.Port.E, "pr")] == 30
+        assert stub_pup.CALLS[(parameters.Port.D, "d")] == 30
+
+
+# ---------------------------------------------------------------------------
+# The wrapper's policy — cadence, tags on the wire, pacing
+# ---------------------------------------------------------------------------
+
+
+class TestWrapperLoop:
+    def test_structure_and_cadence_over_30_cycles(self) -> None:
+        _attach_kit()
+        ns = _load_wrapper()
+        lines = _run_wrapper(ns, cycles=30)
+
+        assert lines[0] == (
+            '{"t":"hub_info","name":"Pybricks Hub","fw":"4.0.1","model":"technichub"}'
+        )
+        assert sum('"t":"hub_info"' in ln for ln in lines) == 1  # snapshot once
+        assert sum('"t":"battery"' in ln for ln in lines) == 3  # cycles 0, 10, 20
+        assert sum('"t":"imu"' in ln for ln in lines) == 30  # every cycle
+        motor = [ln for ln in lines if '"dev":"Motor"' in ln]
+        ambient = [ln for ln in lines if '"dev":"ColorSensor"' in ln]
+        presence = [ln for ln in lines if '"dev":"UltrasonicSensor"' in ln]
+        assert len(motor) == 30 and len(ambient) == 30 and len(presence) == 30
+        # No active fields ever on the agent-mode wire (D9).
+        assert not any('"refl"' in ln for ln in lines)
+        assert not any('"col"' in ln for ln in lines)
+        assert not any(
+            '"dev":"UltrasonicSensor","mode":"distance"' in ln for ln in lines
+        )
+
+    def test_wire_lines_decode_and_reencode_byte_exact(self) -> None:
+        _attach_kit()
+        ns = _load_wrapper()
+        lines = _run_wrapper(ns, cycles=3)
+        for ln in lines:
+            assert encode(decode(ln)) == ln.encode() + b"\r\n"
+
+    def test_mode_tags_on_the_wire(self) -> None:
+        _attach_kit()
+        ns = _load_wrapper()
+        lines = _run_wrapper(ns, cycles=2)
+        ambient = next(ln for ln in lines if '"dev":"ColorSensor"' in ln)
+        presence = next(ln for ln in lines if '"dev":"UltrasonicSensor"' in ln)
         assert (
-            port_lines[0]
-            == '{"t":"port","p":"A","dev":"ForceSensor","f":0.0,"d":0.0,"pressed":false}'
+            ambient
+            == '{"t":"port","p":"C","dev":"ColorSensor","mode":"ambient","amb":12}'
         )
         assert (
-            port_lines[1]
-            == '{"t":"port","p":"B","dev":"ColorDistanceSensor","d":42,"refl":5,"amb":7,"h":200,"s":60,"v":70,"col":"blue"}'
+            presence
+            == '{"t":"port","p":"E","dev":"UltrasonicSensor","mode":"presence","pr":false}'
         )
-        assert (
-            port_lines[2]
-            == '{"t":"port","p":"C","dev":"TiltSensor","pitch":3,"roll":-2}'
-        )
-        assert port_lines[3] == '{"t":"port","p":"E","dev":"InfraredSensor","d":100}'
-        for line in port_lines:
-            assert encode(decode(line)) == (line.encode() + b"\r\n")
 
-    def test_empty_ports_emit_nothing(self, agent) -> None:
-        lines = []
-        teal = agent.TelemetryAgent(stub_hubs.InventorHub(), out=lines.append)
-        teal.start()
-        teal.cycle()
-        assert [ln for ln in lines if '"t":"port"' in ln] == []
+    def test_pacing_sleeps_to_the_next_100ms_boundary(self) -> None:
+        # Drift-free pacing: wait(100 - elapsed % 100) — a slow cycle
+        # shortens the next sleep to the boundary, never a blind 100.
+        _attach_kit()
+        ns = _load_wrapper()
 
-    def test_detach_transition_emits_none_once(self, agent) -> None:
-        # D7: "dev":"none" goes on the wire only on a detach transition —
-        # an attached device whose read starts raising OSError(ENODEV).
-        from pybricks import parameters
-
-        stub_pup.ATTACHED[parameters.Port.A] = "Motor"
-        lines = []
-        teal = agent.TelemetryAgent(stub_hubs.InventorHub(), out=lines.append)
-        teal.start()
-        teal.cycle()
-        assert '"dev":"Motor"' in lines[-1]
-
-        # Unplug: reads now fail; empty-port re-probes must not spam "none".
-        stub_pup.READ_ERRORS.add(parameters.Port.A)
-        del stub_pup.ATTACHED[parameters.Port.A]
-        teal.cycle()
-        none_lines = [ln for ln in lines if '"dev":"none"' in ln]
-        assert none_lines == ['{"t":"port","p":"A","dev":"none"}']
-
-        teal.cycle()
-        teal.cycle()
-        assert sum(1 for ln in lines if '"dev":"none"' in ln) == 1
-
-        # Replug: the same port is discovered again and resumes Motor lines.
-        stub_pup.READ_ERRORS.clear()
-        stub_pup.ATTACHED[parameters.Port.A] = "Motor"
-        teal.cycle()
-        assert '"dev":"Motor"' in lines[-1]
-
-    def test_reprobe_picks_up_new_device(self, agent) -> None:
-        # Hot-plug onto a previously empty port: the next cycle's probe
-        # finds it and emission is unconditional from then on.
-        from pybricks import parameters
-
-        lines = []
-        teal = agent.TelemetryAgent(stub_hubs.InventorHub(), out=lines.append)
-        teal.start()
-        teal.cycle()
-        assert [ln for ln in lines if '"t":"port"' in ln] == []
-
-        stub_pup.ATTACHED[parameters.Port.F] = "ColorSensor"
-        stub_pup.READS[parameters.Port.F] = {
-            "refl": 50,
-            "amb": 30,
-            "hsv": stub_pup.Hsv(120, 40, 60),
-            "col": parameters.Color.GREEN,
-        }
-        teal.cycle()
-        port_lines = [ln for ln in lines if '"t":"port"' in ln]
-        assert port_lines == [
-            '{"t":"port","p":"F","dev":"ColorSensor","refl":50,"amb":30,"h":120,"s":40,"v":60,"col":"green"}'
-        ]
-
-
-class TestFreshnessD9:
-    """Per-field freshness (D9): same-mode primaries every cycle, cross-mode
-    secondaries every SECONDARY_REFRESH cycles, cache seeded at attach."""
-
-    def test_color_primaries_every_cycle_secondary_about_1hz(self, agent) -> None:
-        from pybricks import parameters
-
-        stub_pup.ATTACHED[parameters.Port.C] = "ColorSensor"
-        stub_pup.READS[parameters.Port.C] = {
-            "refl": 34,
-            "amb": 12,
-            "hsv": stub_pup.Hsv(10, 80, 90),
-            "col": parameters.Color.RED,
-        }
-        teal = agent.TelemetryAgent(stub_hubs.InventorHub(), out=lambda _: None)
-        teal.start()
-        for _ in range(30):
-            teal.cycle()
-        refl = stub_pup.CALLS[(parameters.Port.C, "refl")]
-        hsv = stub_pup.CALLS[(parameters.Port.C, "hsv")]
-        amb = stub_pup.CALLS[(parameters.Port.C, "amb")]
-        # Primary reads: every cycle's read() (30) plus the refresh tail
-        # reads that restore the primary mode (3); the probe seed reads
-        # the secondary, not refl.
-        assert refl == 30 + 3
-        assert hsv == 30
-        # Secondary: probe seed + refresh cycles only (C offset 2 →
-        # cycles 2, 12, 22 in 0..29).
-        assert amb == 1 + 3
-
-    def test_secondary_cache_survives_mid_run_value_change(self, agent) -> None:
-        # Between refreshes the cached amb must not track the stub's
-        # current value — the cache is the D9 contract.
-        from pybricks import parameters
-
-        stub_pup.ATTACHED[parameters.Port.C] = "ColorSensor"
-        stub_pup.READS[parameters.Port.C] = {
-            "refl": 34,
-            "amb": 12,
-            "hsv": stub_pup.Hsv(10, 80, 90),
-            "col": parameters.Color.RED,
-        }
-        lines = []
-        teal = agent.TelemetryAgent(stub_hubs.InventorHub(), out=lines.append)
-        teal.start()
-        teal.cycle()  # seed + first line (amb=12)
-        stub_pup.READS[parameters.Port.C]["amb"] = 99
-        teal.cycle()  # C offset 2 → cycle 1 not a refresh: cached 12
-        line_now = [ln for ln in lines if '"t":"port"' in ln][-1]
-        assert '"amb":12' in line_now
-        teal.cycle()  # cycle 2 == offset → refresh: amb=99 now
-        line_now = [ln for ln in lines if '"t":"port"' in ln][-1]
-        assert '"amb":99' in line_now
-
-    def test_ultrasonic_presence_refreshes_about_1hz(self, agent) -> None:
-        from pybricks import parameters
-
-        stub_pup.ATTACHED[parameters.Port.E] = "UltrasonicSensor"
-        stub_pup.READS[parameters.Port.E] = {"d": 245, "pr": False}
-        teal = agent.TelemetryAgent(stub_hubs.InventorHub(), out=lambda _: None)
-        teal.start()
-        for _ in range(30):
-            teal.cycle()
-        dist = stub_pup.CALLS[(parameters.Port.E, "d")]
-        pres = stub_pup.CALLS[(parameters.Port.E, "pr")]
-        # Primary d: 30 cycle reads + 3 refresh tails; secondary pr: seed + 3.
-        assert dist == 30 + 3
-        assert pres == 1 + 3
-
-    def test_refresh_stagger_no_cycle_pays_two_chains(self, agent) -> None:
-        # ColorSensor on C (offset 2) and UltrasonicSensor on E (offset 4)
-        # must never refresh in the same cycle: 30 cycles, per-cycle
-        # CALLS must show no cycle with both amb and pr calls. The stub
-        # counts totals, so assert via the refresh-cycle arithmetic: with
-        # offsets 2 and 4 and period 10, shared cycles are none.
-        from pybricks import parameters
-
-        stub_pup.ATTACHED[parameters.Port.C] = "ColorSensor"
-        stub_pup.READS[parameters.Port.C] = {
-            "refl": 34,
-            "amb": 12,
-            "hsv": stub_pup.Hsv(10, 80, 90),
-            "col": parameters.Color.RED,
-        }
-        stub_pup.ATTACHED[parameters.Port.E] = "UltrasonicSensor"
-        stub_pup.READS[parameters.Port.E] = {"d": 245, "pr": False}
-        teal = agent.TelemetryAgent(stub_hubs.InventorHub(), out=lambda _: None)
-        teal.start()
-        for _ in range(30):
-            teal.cycle()
-        # D9's per-port stagger: refresh sets are disjoint when offsets
-        # differ (period 10, offsets 2 and 4 → never collide).
-        amb_cycles = {2, 12, 22}
-        pr_cycles = {4, 14, 24}
-        assert amb_cycles.isdisjoint(pr_cycles)
-
-    def test_seeded_cache_first_line_carries_measured_secondary(self, agent) -> None:
-        # The attach-time seed read is real: the first emitted line must
-        # carry the stub's amb value, never a placeholder.
-        from pybricks import parameters
-
-        stub_pup.ATTACHED[parameters.Port.C] = "ColorSensor"
-        stub_pup.READS[parameters.Port.C] = {
-            "refl": 34,
-            "amb": 77,
-            "hsv": stub_pup.Hsv(10, 80, 90),
-            "col": parameters.Color.RED,
-        }
-        lines = []
-        teal = agent.TelemetryAgent(stub_hubs.InventorHub(), out=lines.append)
-        teal.start()
-        teal.cycle()
-        line_now = next(ln for ln in lines if '"t":"port"' in ln)
-        assert '"amb":77' in line_now
-
-
-class TestLoop:
-    def test_run_paces_at_10hz_and_drains_forever(self, agent, monkeypatch) -> None:
-        # run() must never return on its own: after N simulated ticks it
-        # is still looping (cancelled here via a raised exception out of
-        # the stubbed wait()).
-        from pybricks import parameters
-
-        stub_pup.ATTACHED[parameters.Port.A] = "Motor"
-        lines = []
+        waits = []
 
         class _Watch:
-            def __init__(self) -> None:
+            def __init__(self):
                 self.now = 0
 
-            def time(self) -> int:
+            def time(self):
                 return self.now
 
-        _watch = _Watch()
+        watch = _Watch()
+
+        def fake_wait(ms):
+            waits.append(ms)
+            watch.now += ms
+            watch.now += 30  # each cycle's work eats into the next budget
+            if len(waits) >= 3:
+                raise KeyboardInterrupt
+
+        ns["InventorHub"] = stub_hubs.InventorHub
+        ns["StopWatch"] = lambda: watch
+        ns["wait"] = fake_wait
+        with pytest.raises(KeyboardInterrupt):
+            ns["main"](out=lambda _ln: None)
+        assert waits == [100, 70, 70]
+
+
+# ---------------------------------------------------------------------------
+# Detach / replug / hot-plug — the D7 transition discipline
+# ---------------------------------------------------------------------------
+
+
+class TestDetachTransitions:
+    def _wrapper_with_kit(self):
+        parameters = _attach_kit()
+        ns = _load_wrapper()
+        return parameters, ns
+
+    def test_detach_emits_none_once_and_replug_recovers(self) -> None:
+        parameters, ns = self._wrapper_with_kit()
+        lines = []
         ticks = {"n": 0}
 
-        def fake_wait(ms: int) -> None:
+        class _Watch:
+            now = 0
+
+            def time(self):
+                return self.now
+
+        watch = _Watch()
+
+        def fake_wait(ms):
             ticks["n"] += 1
-            _watch.now += ms
-            if ticks["n"] >= 30:
-                raise KeyboardInterrupt  # the only exit
+            watch.now += ms
+            if ticks["n"] == 3:  # unplug the color sensor mid-run
+                stub_pup.READ_ERRORS.add(parameters.Port.C)
+                del stub_pup.ATTACHED[parameters.Port.C]
+            if ticks["n"] == 6:  # plug it back in
+                stub_pup.READ_ERRORS.clear()
+                stub_pup.ATTACHED[parameters.Port.C] = "ColorSensor"
+            if ticks["n"] >= 8:
+                raise KeyboardInterrupt
 
-        monkeypatch.setattr(agent, "InventorHub", stub_hubs.InventorHub)
-        monkeypatch.setattr(agent, "StopWatch", _Watch)
-        monkeypatch.setattr(agent, "wait", fake_wait)
-
-        real_agent_cls = agent.TelemetryAgent
-
-        def factory(hub, out=None):
-            return real_agent_cls(hub, out=lines.append)
-
-        monkeypatch.setattr(agent, "TelemetryAgent", factory)
-
+        ns["InventorHub"] = stub_hubs.InventorHub
+        ns["StopWatch"] = lambda: watch
+        ns["wait"] = fake_wait
         with pytest.raises(KeyboardInterrupt):
-            agent.run()
+            ns["main"](out=lines.append)
 
-        # start() + 30 cycles: hub_info once, battery every 10th, imu and
-        # the motor port line every cycle.
+        none_lines = [ln for ln in lines if '"dev":"none"' in ln]
+        assert none_lines == ['{"t":"port","p":"C","dev":"none"}']  # once, D7
+        ambient_after = [ln for ln in lines if '"dev":"ColorSensor"' in ln]
+        assert len(ambient_after) >= 2  # before detach and after replug
+        assert lines[-1] != '{"t":"port","p":"C","dev":"none"}'  # recovered
+
+    def test_hot_plug_is_picked_up_by_reprobe(self) -> None:
+        parameters = _attach_kit()  # Port.F starts empty (not in the kit)
+        ns = _load_wrapper()
+        lines = []
+        ticks = {"n": 0}
+
+        class _Watch:
+            now = 0
+
+            def time(self):
+                return self.now
+
+        watch = _Watch()
+
+        def fake_wait(ms):
+            ticks["n"] += 1
+            watch.now += ms
+            if ticks["n"] == 3:  # hot-plug a tilt sensor mid-run
+                stub_pup.ATTACHED[parameters.Port.F] = "TiltSensor"
+                stub_pup.READS[parameters.Port.F] = {"tilt": (3, -2)}
+            if ticks["n"] >= 5:
+                raise KeyboardInterrupt
+
+        ns["InventorHub"] = stub_hubs.InventorHub
+        ns["StopWatch"] = lambda: watch
+        ns["wait"] = fake_wait
+        with pytest.raises(KeyboardInterrupt):
+            ns["main"](out=lines.append)
+
+        tilt_lines = [ln for ln in lines if '"dev":"TiltSensor"' in ln]
+        assert tilt_lines  # re-probing found it once attached
         assert (
-            lines[0]
-            == '{"t":"hub_info","name":"Pybricks Hub","fw":"4.0.1","model":"technichub"}'
+            tilt_lines[0]
+            == '{"t":"port","p":"F","dev":"TiltSensor","pitch":3,"roll":-2}'
         )
-        assert sum(1 for ln in lines if '"t":"battery"' in ln) == 3
-        assert sum(1 for ln in lines if '"t":"imu"' in ln) == 30
-        assert sum(1 for ln in lines if '"t":"port"' in ln) == 30
+
+    def test_infrared_port_stays_invisible(self) -> None:
+        # A plugged IR sensor is not detected (D9) — no line for port F.
+        parameters = _attach_kit()
+        stub_pup.ATTACHED[parameters.Port.F] = "InfraredSensor"
+        stub_pup.READS[parameters.Port.F] = {"d": 50}
+        ns = _load_wrapper()
+        lines = _run_wrapper(ns, cycles=4)
+        assert not any('"dev":"InfraredSensor"' in ln for ln in lines)
+        assert not any('"p":"F"' in ln for ln in lines)

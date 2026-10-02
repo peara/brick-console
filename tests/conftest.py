@@ -40,6 +40,10 @@ def pytest_collection_modifyitems(
 
 
 # The pybricks stubs must be importable for agent tests to import the
-# agent module at all. Put them at the very front so they win over any
-# same-named package on the path (there is none on the host).
+# agent modules at all; agent/ goes on the path too so the wrapper's
+# ``import brick_telemetry`` resolves to the real library (the same file
+# pybricksdev bundles on the hub). Stubs first, then agent — no name
+# collisions (pybricks vs brick_telemetry/agent_main).
+_AGENT = Path(__file__).resolve().parents[1] / "agent"
 sys.path.insert(0, str(_STUBS))
+sys.path.insert(0, str(_AGENT))
