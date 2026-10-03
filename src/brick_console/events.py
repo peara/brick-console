@@ -4,9 +4,10 @@ Everything the dashboard ever shows — battery, ports, IMU, hub identity —
 travels as *telemetry events* (D7 terminology): small JSON lines the
 hub-side ``brick_telemetry`` agent prints over hub stdout, one JSON object
 per ``print()``. This module is the contract both sides code against: the
-hub-side encoder (a later issue) emits the canonical lines below; the server
-decodes them (:func:`decode`) into typed events and can re-emit
-(:func:`encode`) byte-exactly. Turning raw stdout *bytes* into lines and
+hub-side encoder (the ``brick_telemetry`` library in ``agent/``) emits the
+canonical lines below; the server decodes them (:func:`decode`) into typed
+events and can re-emit (:func:`encode`) byte-exactly. Turning raw stdout
+*bytes* into lines and
 lines into events — framing, chunk buffering, the malformed counter — is
 :mod:`brick_console.parsing`'s job; this module is pure wire ⇄ Python.
 
@@ -25,17 +26,24 @@ that classification; the caching belongs to the telemetry store and the WS
 gateway (D7).
 
 Canonical examples — the whole wire format on one page (CRLF terminators
-omitted; :func:`encode` appends them)::
+omitted; :func:`encode` appends them). Idle-agent lines first (D9: the
+agent emits only the passive subset)::
 
     {"t":"hub_info","name":"Pybricks Hub","fw":"4.0.1","model":"technichub"}
     {"t":"battery","v":8085,"c":42,"pct":87}
     {"t":"imu","ax":120,"ay":-980,"az":9810,"gx":0,"gy":0,"gz":3,"up":"top"}
     {"t":"port","p":"A","dev":"Motor","angle":12,"speed":0,"load":0}
-    {"t":"port","p":"B","dev":"ColorSensor","refl":34,"amb":12,"h":10,"s":80,"v":90,"col":"red"}
+    {"t":"port","p":"B","dev":"ColorSensor","mode":"ambient","amb":12}
     {"t":"port","p":"C","dev":"ForceSensor","f":0.0,"d":0.0,"pressed":false}
-    {"t":"port","p":"D","dev":"UltrasonicSensor","d":245,"pr":false}
+    {"t":"port","p":"D","dev":"UltrasonicSensor","mode":"presence","pr":false}
     {"t":"port","p":"E","dev":"TiltSensor","pitch":3,"roll":-2}
     {"t":"port","p":"F","dev":"none"}
+
+Program-mode lines (M2, R5 opt-in — a user program owns the sensors,
+publishes its active readings under the matching tag)::
+
+    {"t":"port","p":"B","dev":"ColorSensor","mode":"surface","refl":34,"h":10,"s":80,"v":90,"col":"red"}
+    {"t":"port","p":"D","dev":"UltrasonicSensor","mode":"distance","d":245}
 
 Units and meanings (D7 field dictionary):
 
@@ -50,33 +58,52 @@ Units and meanings (D7 field dictionary):
 - ``port`` (~10 Hz, one line per attached device, unconditional per cycle;
   ``dev:"none"`` only on a detach transition) — ``p`` A–F · ``dev`` device
   string from an **open set** (kept as a plain passthrough string, never a
-  closed Python enum) · per-device keys:
+  closed Python enum) · optional ``mode`` reading-mode tag (D9: the idle
+  agent is passive — mode-dependent sensor lines carry the tag, single-mode
+  devices and ``none`` carry none) · fields validate per the declared
+  ``(dev, mode)`` pair:
 
   - ``Motor`` — ``angle`` ° (output shaft) · ``speed`` °/s (100 ms window) ·
-    ``load`` **mNm** (torque estimate, not %).
-  - ``ColorSensor`` — ``refl`` % · ``amb`` % · ``h`` 0–360° · ``s`` % ·
-    ``v`` % · ``col`` color name or ``"none"``.
+    ``load`` **mNm** (torque estimate, not %). Single mode, no tag.
+  - ``ColorSensor`` — ``"mode":"ambient"``: ``amb`` % (light off — the
+    idle agent's line) · ``"mode":"surface"``: ``refl`` % · ``h`` 0–360° ·
+    ``s`` % · ``v`` % · ``col`` color name or ``"none"`` (light on — a
+    program-mode line, M2 opt-in).
   - ``ForceSensor`` — ``f`` N (~0–10) · ``d`` mm (~0–8) · ``pressed`` bool
-    (3 N threshold).
-  - ``UltrasonicSensor`` — ``d`` mm (2000 = no echo) · ``pr`` bool.
-  - ``ColorDistanceSensor`` — ``d`` **%** (BOOST-era unit trap, not mm),
-    plus ``refl``/``amb``/``h``/``s``/``v``/``col``.
-  - ``TiltSensor`` — ``pitch`` ° · ``roll`` °.
-  - ``InfraredSensor`` — ``d`` % relative (WeDo motion sensor).
+    (3 N threshold). Single mode, no tag.
+  - ``UltrasonicSensor`` — ``"mode":"presence"``: ``pr`` bool (transmitter
+    off — the idle agent's line) · ``"mode":"distance"``: ``d`` mm
+    (2000 = no echo; active ping — program mode, M2).
+  - ``ColorDistanceSensor`` — ``"mode":"ambient"``: ``amb`` % ·
+    ``"mode":"distance"``: ``d`` **%** (BOOST-era unit trap, not mm) ·
+    ``"mode":"surface"``: ``refl``/``h``/``s``/``v``/``col`` as ColorSensor
+    surface. Not in the 51515 kit; dictionary completeness, not
+    hardware-verified.
+  - ``TiltSensor`` — ``pitch`` ° · ``roll`` °. Single mode, no tag.
+  - ``InfraredSensor`` — ``d`` % relative (WeDo motion sensor). Single
+    mode, no tag — but an active IR emitter (D9): never read by the idle
+    agent; program-mode only.
   - ``none`` — empty port, no extra keys.
+
+The full field dictionary (per ``(dev, mode)`` pair, wire types, tag
+semantics, canonical lines) lives in `docs/specs/telemetry-wire.md` — the
+spec content per D7's evolution note; this module and the hub-side library
+code against it, and D7 remains the decision record.
 
 Unknown/malformed policy (D7): a ``"t"`` other than the four known kinds
 wraps as :class:`UnknownEvent` carrying the parsed JSON object verbatim
 (forward compatibility is versioned by addition — new kinds and new fields
 on known kinds are safely ignorable). Unknown fields on known kinds are
-ignored, as are the unmapped extra keys of an unknown ``dev`` string; the
-raw line (retained by the raw-log-primary path — the telemetry store's
-raw-line ring, D7) remains the verbatim record. Wire-level failures — invalid JSON/UTF-8, a non-object payload, a
-missing or non-string ``"t"``, or a known kind missing required fields or
-carrying wrongly-typed ones — raise :class:`EventDecodeError`, which the
-parser counts as malformed and skips; decoding never guesses. Numbers keep
-their JSON type (``12`` stays ``int``, never ``12.0``) so the canonical
-lines re-encode byte-exactly.
+ignored, as are the unmapped extra keys of an unknown ``dev`` string or an
+unknown ``(dev, mode)`` pair; the raw line (retained by the raw-log-primary
+path — the telemetry store's raw-line ring, D7) remains the verbatim
+record. Wire-level failures — invalid JSON/UTF-8, a non-object payload, a
+missing or non-string ``"t"``, a known kind missing required fields or
+carrying wrongly-typed ones, or a mode-dependent ``port`` line missing its
+``mode`` tag — raise :class:`EventDecodeError`, which the parser counts as
+malformed and skips; decoding never guesses. Numbers keep their JSON type
+(``12`` stays ``int``, never ``12.0``) so the canonical lines re-encode
+byte-exactly.
 """
 
 from __future__ import annotations
@@ -183,6 +210,8 @@ class Port:
 
     port: str  # wire "p": port letter A-F
     device: str  # wire "dev": device string, open set (passthrough, never an enum)
+    mode: str | None = None  # wire "mode": reading-mode tag (D9) — ambient/surface,
+    # presence/distance; None = no tag (single-mode device, unknown pair, or "none")
     received_at: float | None = field(
         default=None, compare=False
     )  # stamped by the parser
@@ -235,50 +264,68 @@ type TelemetryEvent = HubInfo | Battery | Imu | Port | UnknownEvent
 """A parsed telemetry event — one hub-emitted JSON line (D7 terminology)."""
 
 
-# Port per-device wire dictionary (D7): dev -> ((wire key, Python field, JSON
-# type), ...) in canonical emission order — the single source of truth for
-# both decode and encode. Known devices require every listed key: emission is
-# unconditional per cycle, so a missing key is an agent bug surfaced as
-# EventDecodeError (counted malformed, never guessed). "none" is the empty
-# port (no keys); an unknown dev string maps to () — passthrough, no fields.
-_PORT_SPECS: dict[str, tuple[tuple[str, str, str], ...]] = {
-    "Motor": (
-        ("angle", "angle_deg", "number"),
-        ("speed", "speed_dps", "number"),
-        ("load", "load_mnm", "number"),
-    ),
-    "ColorSensor": (
-        ("refl", "reflection_pct", "number"),
-        ("amb", "ambient_pct", "number"),
-        ("h", "hue_deg", "number"),
-        ("s", "saturation_pct", "number"),
-        ("v", "value_pct", "number"),
-        ("col", "color", "string"),
-    ),
-    "ForceSensor": (
-        ("f", "force_n", "number"),
-        ("d", "distance_mm", "number"),
-        ("pressed", "pressed", "boolean"),
-    ),
-    "UltrasonicSensor": (
-        ("d", "distance_mm", "number"),
-        ("pr", "presence", "boolean"),
-    ),
-    "ColorDistanceSensor": (
-        ("d", "distance_pct", "number"),  # % — BOOST-era unit trap (D7)
-        ("refl", "reflection_pct", "number"),
-        ("amb", "ambient_pct", "number"),
-        ("h", "hue_deg", "number"),
-        ("s", "saturation_pct", "number"),
-        ("v", "value_pct", "number"),
-        ("col", "color", "string"),
-    ),
-    "TiltSensor": (
-        ("pitch", "pitch_deg", "number"),
-        ("roll", "roll_deg", "number"),
-    ),
-    "InfraredSensor": (("d", "distance_pct", "number"),),
-    "none": (),
+# Port per-device wire dictionary (D7 + D9): dev -> reading mode ->
+# ((wire key, Python field, JSON type), ...) in canonical emission order —
+# the single source of truth for both decode and encode. A ``None`` mode
+# key marks a single-mode device (no tag on the wire); mode-dependent
+# devices (ColorSensor, UltrasonicSensor, ColorDistanceSensor) tag every
+# line, and a known pair's listed keys are all required (extra keys are
+# ignored per D7's addition-versioning; the raw line stays the verbatim
+# record). Per D9 the idle agent emits only the passive subset —
+# "ambient"/"presence" — while "surface"/"distance" lines are published
+# by user programs (M2 opt-in). An unknown dev string maps to no entry and
+# an unknown (dev, mode) pair to no spec — passthrough, no typed fields.
+# The full dictionary (semantics, units, canonical lines) lives in
+# docs/specs/telemetry-wire.md (D7 evolution note); this table is its
+# executable mirror.
+_PORT_SPECS: dict[str, dict[str | None, tuple[tuple[str, str, str], ...]]] = {
+    "Motor": {
+        None: (
+            ("angle", "angle_deg", "number"),
+            ("speed", "speed_dps", "number"),
+            ("load", "load_mnm", "number"),
+        ),
+    },
+    "ColorSensor": {
+        "ambient": (("amb", "ambient_pct", "number"),),
+        "surface": (
+            ("refl", "reflection_pct", "number"),
+            ("h", "hue_deg", "number"),
+            ("s", "saturation_pct", "number"),
+            ("v", "value_pct", "number"),
+            ("col", "color", "string"),
+        ),
+    },
+    "ForceSensor": {
+        None: (
+            ("f", "force_n", "number"),
+            ("d", "distance_mm", "number"),
+            ("pressed", "pressed", "boolean"),
+        ),
+    },
+    "UltrasonicSensor": {
+        "presence": (("pr", "presence", "boolean"),),
+        "distance": (("d", "distance_mm", "number"),),
+    },
+    "ColorDistanceSensor": {
+        "ambient": (("amb", "ambient_pct", "number"),),
+        "distance": (("d", "distance_pct", "number"),),  # % — BOOST-era unit trap (D7)
+        "surface": (
+            ("refl", "reflection_pct", "number"),
+            ("h", "hue_deg", "number"),
+            ("s", "saturation_pct", "number"),
+            ("v", "value_pct", "number"),
+            ("col", "color", "string"),
+        ),
+    },
+    "TiltSensor": {
+        None: (
+            ("pitch", "pitch_deg", "number"),
+            ("roll", "roll_deg", "number"),
+        ),
+    },
+    "InfraredSensor": {None: (("d", "distance_pct", "number"),)},
+    "none": {None: ()},
 }
 
 
@@ -365,12 +412,29 @@ def _decode_imu(obj: dict[str, JsonValue]) -> Imu:
 def _decode_port(obj: dict[str, JsonValue]) -> Port:
     p = _take(obj, "p", _string, "port")
     dev = _take(obj, "dev", _string, "port")
+    mode: str | None = None
+    if "mode" in obj:
+        mode = _take(obj, "mode", _string, "port")
+    modes = _PORT_SPECS.get(dev)
+    spec: tuple[tuple[str, str, str], ...] | None = None
+    if modes is not None:
+        if mode is None:
+            # Mode-dependent devices tag every line (D9) — an untagged line
+            # cannot say which reading its fields belong to.
+            if None not in modes:
+                raise EventDecodeError(
+                    f"port {dev}: missing required 'mode' reading-mode tag"
+                )
+            spec = modes[None]
+        else:
+            spec = modes.get(mode)  # unknown pair -> None -> passthrough
     fields: dict[str, JsonValue] = {}
-    for wire_key, py_name, type_tag in _PORT_SPECS.get(dev, ()):
-        fields[py_name] = _take(obj, wire_key, _VALIDATORS[type_tag], f"port {dev}")
+    if spec:
+        for wire_key, py_name, type_tag in spec:
+            fields[py_name] = _take(obj, wire_key, _VALIDATORS[type_tag], f"port {dev}")
     # dynamic-by-design: kwargs are keyed by the _PORT_SPECS wire table and
     # each value is already _VALIDATORS-checked against its field's type.
-    return Port(port=p, device=dev, **fields)  # type: ignore[arg-type]  # see above
+    return Port(port=p, device=dev, mode=mode, **fields)  # type: ignore[arg-type]  # see above
 
 
 def decode(line: str | bytes) -> TelemetryEvent:
@@ -438,7 +502,11 @@ def encode(event: TelemetryEvent) -> bytes:
         }
     elif isinstance(event, Port):
         obj = {"t": "port", "p": event.port, "dev": event.device}
-        for wire_key, py_name, _type_tag in _PORT_SPECS.get(event.device, ()):
+        if event.mode is not None:
+            obj["mode"] = event.mode
+        for wire_key, py_name, _type_tag in _PORT_SPECS.get(event.device, {}).get(
+            event.mode, ()
+        ):
             value = getattr(event, py_name)
             if value is not None:
                 obj[wire_key] = value

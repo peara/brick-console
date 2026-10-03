@@ -14,6 +14,8 @@ no async tests are needed here).
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
 from dataclasses import dataclass
 
 import pytest
@@ -123,36 +125,37 @@ def test_dead_manager_task_web_tier_survives() -> None:
 # ---------------------------------------------------------------------------
 
 
+class HubOffTransport(Transport):
+    """The hub-off fake. Declared per test file (tests/ is not a package);
+    discover() raises TimeoutError = "hub off", so the real manager's loop
+    parks in OFFLINE exactly as it would with the hub powered down."""
+
+    async def discover(self, name, *, timeout=10.0):
+        raise TimeoutError()
+
+    async def connect(self, hub, *, on_disconnect): ...
+
+    async def install_and_start(self, program, *, wait=False): ...
+
+    async def stop(self): ...
+
+    async def probe(self): ...
+
+    async def write_stdin(self, data): ...
+
+    async def subscribe_stdout(self, listener): ...
+
+    async def subscribe_status(self, listener): ...
+
+    async def disconnect(self): ...
+
+
 def test_real_manager_and_store_compose_into_the_app() -> None:
     # The issue wires the app to the existing seams — do not reimplement
     # them. This pins that the real BLEManager satisfies the app's
     # ManagerHandle protocol structurally (state/state_reason/run) and the
     # real TelemetryStore is accepted as the injected store handle, so a
     # future signature drift on either seam fails here, not in production.
-    # FakeTransport is re-declared locally (tests/ is not a package); its
-    # discover() raises TimeoutError = "hub off", so the manager's loop
-    # parks in OFFLINE exactly as it would with the real hub powered down.
-
-    class HubOffTransport(Transport):
-        async def discover(self, name, *, timeout=10.0):
-            raise TimeoutError()
-
-        async def connect(self, hub, *, on_disconnect): ...
-
-        async def install_and_start(self, program, *, wait=False): ...
-
-        async def stop(self): ...
-
-        async def probe(self): ...
-
-        async def write_stdin(self, data): ...
-
-        async def subscribe_stdout(self, listener): ...
-
-        async def subscribe_status(self, listener): ...
-
-        async def disconnect(self): ...
-
     store = TelemetryStore(event_capacity=8)
     manager = BLEManager(HubOffTransport(), store)
     app = create_app(manager, store=store)
@@ -364,45 +367,114 @@ def test_run_module_wires_app_to_entry_point(monkeypatch: pytest.MonkeyPatch) ->
 
 
 # ---------------------------------------------------------------------------
-# StubManager — the manager production actually runs today
+# Run-command wiring — real BLEManager (StubManager stays the offline fallback)
 # ---------------------------------------------------------------------------
 
 
-def test_stub_manager_parks_and_survives_two_lifespans() -> None:
-    # Regression: an asyncio.Event created in StubManager.__init__ bound to
-    # the first loop that awaited it; a second lifespan on the same app
-    # (uvicorn --reload, a test re-entering a client) hit "Event is bound
-    # to a different event loop" and silently killed the manager task.
-    # The park latch must be per-run() so every lifespan gets its own loop.
-    from brick_console.run import StubManager
+def test_run_command_wires_real_manager_and_agent_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Issue #15: main() wires the real BLEManager over PybricksDevTransport,
+    # not StubManager. The BLE stack (adapter imports) must stay inside
+    # main() so importing brick_console.run stays bleak-free (the mock-source
+    # isolation test pins that) — hence the import must happen *inside*
+    # main() at this exact point, and this test monkeypatches the adapter
+    # module, not run's namespace.
+    import brick_console.run as run_mod
 
-    stub = StubManager()
-    app = create_app(stub)
+    captured: dict[str, object] = {}
+
+    def fake_uvicorn_run(app, *, host, port, log_config=None):
+        captured["app"] = app
+
+    import brick_console.adapter as adapter_mod
+    import brick_console.ble_manager as ble_manager_mod
+
+    real_transport_cls = adapter_mod.PybricksDevTransport
+
+    class OfflineTransport(real_transport_cls):
+        # Subclassing pins the real class is what main() constructs; the
+        # discover override keeps this test BLE-free (hub off = scan miss).
+        async def discover(self, name, *, timeout=10.0):
+            raise TimeoutError()
+
+    monkeypatch.setattr(
+        adapter_mod, "PybricksDevTransport", OfflineTransport, raising=True
+    )
+    monkeypatch.setattr(run_mod.uvicorn, "run", fake_uvicorn_run, raising=True)
+    monkeypatch.delenv("BRICK_CONSOLE_HOST", raising=False)
+    monkeypatch.setenv("BRICK_CONSOLE_PORT", "9100")
+
+    run_mod.main()
+
+    app = captured["app"]
+    assert isinstance(app.state.manager, ble_manager_mod.BLEManager)
+    assert isinstance(app.state.store, TelemetryStore)
+    # The agent-program default must resolve to the repo's agent/ wrapper —
+    # and the wrapper must actually exist for the manager to install it.
+    agent_program = app.state.manager.config.agent_program
+    assert agent_program.name == "agent_main.py"
+    assert agent_program.parent.name == "agent"
+    assert agent_program.exists()
+    # No BLE executed (the offline transport's discover is the only entry),
+    # yet the wired service starts, /healthz reports, and the dashboard
+    # serves — the sanctioned auto-rescan exemption (#15 disposition).
+    with TestClient(app) as client:
+        healthz = client.get("/healthz").json()
+        assert healthz["status"] == "ok"
+        assert healthz["hub"]["state"] == "offline"
+        assert client.get("/").status_code == 200
+
+
+def test_main_logging_survives_uvicorn_dictconfig() -> None:
+    # Found wiring the real manager: uvicorn's dictConfig equips only its
+    # uvicorn.* loggers, so the app's own INFO lines — manager state
+    # transitions, malformed-line counts, lifespan start/stop — dropped at
+    # the unconfigured root (the last-resort handler emits WARNING+ only).
+    # Invisible with the stub, which never logged. main() must equip the
+    # root handler itself, and it must survive what uvicorn.run applies
+    # next (dictConfig disables no existing loggers). Subprocess-pinned
+    # because pytest's logging capture equips root handlers in-process,
+    # which would make basicConfig a no-op and mask the regression.
+    code = (
+        "import sys;"
+        "sys.path.insert(0, 'src');"
+        "import brick_console.run as run_mod;"
+        "run_mod.uvicorn.run = lambda app, **kw: None;"
+        "run_mod.main();"
+        "import logging.config;"
+        "from uvicorn.config import LOGGING_CONFIG;"
+        "logging.config.dictConfig(LOGGING_CONFIG);"
+        "logging.getLogger('brick_console.regression').info('MANAGER-LOG-VISIBLE');"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "MANAGER-LOG-VISIBLE" in result.stderr
+
+
+def test_real_manager_parks_and_survives_two_lifespans() -> None:
+    # Regression value carried over per #15's disposition: a park latch or
+    # per-session state created outside run() binds to the first event
+    # loop that awaits it; a second lifespan on the same app (uvicorn
+    # --reload, or a test re-entering a client) then hits "Event is bound
+    # to a different event loop" and silently kills the manager task.
+    # Now pinned against the real manager (fake hub-off transport), the
+    # wiring production actually runs.
+    store = TelemetryStore()
+    manager = BLEManager(HubOffTransport(), store)
+    app = create_app(manager, store=store)
 
     with TestClient(app) as client:
-        assert stub.started == 1
-        body = client.get("/healthz").json()
-    assert body["hub"] == {"state": "offline", "reason": "manager not wired yet (stub)"}
+        assert client.get("/healthz").json()["hub"]["state"] == "offline"
 
-    # Second lifespan, fresh event loop: the stub must park again, not die.
+    # Second lifespan, fresh event loop: the manager must park again in
+    # its rescan loop, not die on cross-loop state.
     with TestClient(app) as client:
-        assert stub.started == 2
         assert client.get("/healthz").json()["hub"]["state"] == "offline"
         assert app.state.manager_task is not None
         assert not app.state.manager_task.done()
-
-
-def test_stub_manager_start_reason_matches_healthz() -> None:
-    # The stub's contract: hub pinned offline, reason names the stub —
-    # /healthz must surface exactly this until the real manager lands.
-    from brick_console.run import StubManager
-
-    stub = StubManager()
-    with TestClient(create_app(stub)) as client:
-        body = client.get("/healthz").json()
-
-    assert body["hub"]["state"] == stub.state
-    assert body["hub"]["reason"] == stub.state_reason == "manager not wired yet (stub)"
 
 
 def test_bind_config_port_range_enforced() -> None:

@@ -555,8 +555,10 @@ class MockSource:
 
     def _cycle_events(self, tick: int) -> list[TelemetryEvent]:
         """One tick's synthetic events: imu + a Motor on port A + a
-        ColorSensor on port B — a couple of fake port devices, mildly
-        time-varying so motion on the dashboard is visible."""
+        ColorSensor on port B reporting its resting ambient reading (D9:
+        the idle agent is passive — mode-dependent sensors emit only
+        their resting mode) — mildly time-varying so motion on the
+        dashboard is visible."""
         return [
             Imu(
                 accel=(120 + tick % 10, -980, 9810 + tick % 7),
@@ -573,12 +575,8 @@ class MockSource:
             Port(
                 port="B",
                 device="ColorSensor",
-                reflection_pct=30 + tick % 10,
+                mode="ambient",
                 ambient_pct=10 + tick % 5,
-                hue_deg=tick % 360,
-                saturation_pct=80,
-                value_pct=90,
-                color="red",
             ),
         ]
 
