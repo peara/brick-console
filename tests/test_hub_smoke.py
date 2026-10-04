@@ -134,7 +134,7 @@ async def test_m1_chain_on_real_hub() -> None:
             pytest.fail(
                 f"telemetry incomplete {TELEMETRY_WINDOW} s after connect: "
                 f"missing {missing}, saw {seen}; events={len(events)}, "
-                f"malformed={parser.malformed_count()}, "
+                f"malformed={parser.malformed_count}, "
                 f"program_running_seen={_program_running(statuses)}, "
                 f"status_reports={len(statuses)}"
             )
@@ -146,14 +146,18 @@ async def test_m1_chain_on_real_hub() -> None:
         assert hub_info.name == HUB_NAME
     finally:
         # Leave the hub clean: stop the agent, release the central role
-        # (the soak script's graceful ending). Best-effort — a dead link
-        # must not mask the real failure — but loud, not silent.
+        # (the soak script's graceful ending). Two separate try blocks —
+        # a failed stop must not skip the disconnect, or the hub stays
+        # held (rule 3: one central). Best-effort — a dead link must not
+        # mask the real failure — but loud, not silent.
         try:
             await transport.stop()
+        except (ConnectionError, OSError) as exc:
+            warnings.warn(f"smoke teardown: agent stop failed: {exc!r}", stacklevel=2)
+        try:
             await transport.disconnect()
         except (ConnectionError, OSError) as exc:
             warnings.warn(
-                f"smoke teardown incomplete — hub may keep the agent running "
-                f"or stay held: {exc!r}",
+                f"smoke teardown: disconnect failed — the hub may stay held: {exc!r}",
                 stacklevel=2,
             )
