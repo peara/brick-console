@@ -99,12 +99,17 @@ def summary_text(
     started_wall: float,
     ended_wall: float,
     *,
+    duration: float,
     interval: float,
     changes: int,
     server_down_events: int,
 ) -> str:
-    """The soak summary: hours, sessions, disconnects, reconnect latencies."""
-    duration = ended_wall - started_wall
+    """The soak summary: hours, sessions, disconnects, reconnect latencies.
+
+    ``duration`` is the monotonic watch length; the wall-clock pair is
+    display-only (the ``watched:`` header), never fed to duration math —
+    an NTP step mid-soak must not distort session lengths.
+    """
     sessions = extract_sessions(rows)
     hub_drops = [
         s
@@ -196,7 +201,15 @@ def _selftest() -> int:
         if s.dropped is not None and s.dropped.state in HUB_DISCONNECT_STATES
     ]
     assert len(hub_drops) == 1, "server_down must not count as a hub disconnect"
-    text = summary_text(rows, 0.0, 10.0, interval=1.0, changes=8, server_down_events=1)
+    text = summary_text(
+        rows,
+        0.0,
+        10.0,
+        duration=10.0,
+        interval=1.0,
+        changes=8,
+        server_down_events=1,
+    )
     assert "hub disconnects: 1" in text
     assert "censored at watch end: 1" in text
     assert "reconnect latencies" in text
@@ -239,6 +252,7 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, request_stop)
 
     started_wall = time.time()
+    started_mono = time.monotonic()
     rows: list[Row] = []
     changes = 0
     server_down_events = 0
@@ -261,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
                 # server_down, never crash and lose the timeline.
                 state, reason = "server_down", repr(exc)[:200]
             row = Row(
-                mono=now - started_wall,
+                mono=time.monotonic() - started_mono,
                 epoch=now,
                 state=state,
                 reason=reason.replace("\t", " ").replace("\n", " "),
@@ -292,10 +306,12 @@ def main(argv: list[str] | None = None) -> int:
                 time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
 
     ended_wall = time.time()
+    duration = time.monotonic() - started_mono
     text = summary_text(
         rows,
         started_wall,
         ended_wall,
+        duration=duration,
         interval=args.interval,
         changes=changes,
         server_down_events=server_down_events,
