@@ -37,7 +37,6 @@ import json
 import signal
 import sys
 import time
-import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -254,13 +253,12 @@ def main(argv: list[str] | None = None) -> int:
                 state, reason = poll_healthz(
                     args.base_url, timeout=max(args.interval, 2.0)
                 )
-            except (
-                urllib.error.URLError,
-                TimeoutError,
-                json.JSONDecodeError,
-                KeyError,
-                ValueError,
-            ) as exc:
+            except Exception as exc:  # noqa: BLE001
+                # An observation harness records every failure verbatim
+                # (takeover_observation.py's rule): a server dying
+                # mid-response raises HTTPException (not URLError), and
+                # an unattended overnight watch must record that as
+                # server_down, never crash and lose the timeline.
                 state, reason = "server_down", repr(exc)[:200]
             row = Row(
                 mono=now - started_wall,
