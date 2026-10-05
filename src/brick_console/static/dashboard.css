@@ -1,8 +1,9 @@
 /* brick-console dashboard (R2) — no framework, no build step (§8).
    Status chip tones per architecture §4; stale/dim states per R5.
    Layout: two columns — HUB/BATTERY/IMU stack left, the port map owns
-   the full-height right column, CONSOLE spans full-width below; one
-   column at ≤820px (see the media query at the bottom). */
+   the bounded right column (matches the left stack's height, scrolls
+   internally on overflow), CONSOLE spans full-width below; one column
+   at ≤820px (see the media query at the bottom). */
 
 :root {
   --bg: #10141a;
@@ -86,9 +87,11 @@ body {
 }
 
 /* Two-column dashboard (issue #39): areas name the section ids — left
-   stack, full-height ports column, full-width console. Fixed 30rem
-   right column keeps port cards near natural width; the left absorbs
-   the slack. Single column at ≤820px (media query below). */
+   stack, bounded ports column, full-width console. Fixed 30rem right
+   column keeps port cards near natural width; the left absorbs the
+   slack. align-items: start (owner feedback): a card's intrinsic
+   height must never stretch a grid row — no forced stretch anywhere.
+   Single column at ≤820px (media query below). */
 #dashboard {
   display: grid;
   gap: 1rem;
@@ -99,6 +102,7 @@ body {
     "battery ports"
     "imu    ports"
     "console console";
+  align-items: start;
   max-width: 72rem;
 }
 
@@ -114,10 +118,15 @@ body {
   grid-area: imu;
 }
 
+/* Match the left stack's height, never exceed it: min-height: 0
+   clamps the card to the track and routes overflow into .ports'
+   internal scroll (owner feedback). */
 #ports-card {
   grid-area: ports;
+  align-self: stretch;
+  min-height: 0;
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto minmax(0, 1fr);
 }
 
 /* OFFLINE/EXTERNAL: the state envelope grays every card out (§4 table). */
@@ -196,12 +205,18 @@ body {
   color: var(--connecting);
 }
 
-/* Port map — the 51515 hub face: 2 columns × 3 rows, A B / C D / E F. */
+/* Port map — the 51515 hub face: 2 columns × 3 rows, A B / C D / E F.
+   max-height ≈ the left stack's inner height at desktop: the card
+   never grows the grid rows past the left column, and taller content
+   scrolls internally instead of stretching the page (owner feedback). */
 .ports {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 0.6rem;
   grid-auto-rows: 1fr;
+  max-height: 31rem;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .port-card {
@@ -301,7 +316,9 @@ body {
 /* Narrow view: one column, cards stack in source order (hub, battery,
    imu, ports, console). 820px keeps the left column at or above the
    old minmax(260px, 1fr) floor at the boundary (a scrollbar takes
-   ~15px: 820 − 40 padding − 480 ports − 16 gap − 15 ≈ 269px ≥ 260). */
+   ~15px: 820 − 40 padding − 480 ports − 16 gap − 15 ≈ 269px ≥ 260).
+   No left stack to match here, so cap the ports card by viewport: it
+   scrolls internally instead of stretching the page (owner feedback). */
 @media (max-width: 820px) {
   #dashboard {
     grid-template-columns: 1fr;
@@ -311,5 +328,9 @@ body {
       "imu"
       "ports"
       "console";
+  }
+
+  #ports-card {
+    max-height: 70vh;
   }
 }
