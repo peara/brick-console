@@ -1,5 +1,8 @@
 /* brick-console dashboard (R2) — no framework, no build step (§8).
-   Status chip tones per architecture §4; stale/dim states per R5. */
+   Status chip tones per architecture §4; stale/dim states per R5.
+   Layout: two columns — HUB/BATTERY/IMU stack left, the port map owns
+   the full-height right column, CONSOLE spans full-width below; one
+   column at ≤820px (see the media query at the bottom). */
 
 :root {
   --bg: #10141a;
@@ -82,12 +85,39 @@ body {
   min-height: 1.3em;
 }
 
+/* Two-column dashboard (issue #39): areas name the section ids — left
+   stack, full-height ports column, full-width console. Fixed 30rem
+   right column keeps port cards near natural width; the left absorbs
+   the slack. Single column at ≤820px (media query below). */
 #dashboard {
   display: grid;
   gap: 1rem;
   padding: 1rem 1.25rem 2rem;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: 1fr 30rem;
+  grid-template-areas:
+    "hub    ports"
+    "battery ports"
+    "imu    ports"
+    "console console";
   max-width: 72rem;
+}
+
+#hub-card {
+  grid-area: hub;
+}
+
+#battery-card {
+  grid-area: battery;
+}
+
+#imu-card {
+  grid-area: imu;
+}
+
+#ports-card {
+  grid-area: ports;
+  display: grid;
+  grid-template-rows: auto 1fr;
 }
 
 /* OFFLINE/EXTERNAL: the state envelope grays every card out (§4 table). */
@@ -166,11 +196,12 @@ body {
   color: var(--connecting);
 }
 
-/* Port map — A–F chips. */
+/* Port map — the 51515 hub face: 2 columns × 3 rows, A B / C D / E F. */
 .ports {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: 0.6rem;
+  grid-auto-rows: 1fr;
 }
 
 .port-card {
@@ -229,7 +260,7 @@ body {
 
 /* Console pane — raw stdout (raw-log-primary, D7). */
 #console-card {
-  grid-column: 1 / -1;
+  grid-area: console;
 }
 
 .hint {
@@ -267,8 +298,18 @@ body {
   font-size: 0.68rem;
 }
 
-@media (max-width: 560px) {
-  .ports {
-    grid-template-columns: repeat(2, 1fr);
+/* Narrow view: one column, cards stack in source order (hub, battery,
+   imu, ports, console). 820px keeps the left column at or above the
+   old minmax(260px, 1fr) floor at the boundary (a scrollbar takes
+   ~15px: 820 − 40 padding − 480 ports − 16 gap − 15 ≈ 269px ≥ 260). */
+@media (max-width: 820px) {
+  #dashboard {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "hub"
+      "battery"
+      "imu"
+      "ports"
+      "console";
   }
 }
